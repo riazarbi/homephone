@@ -14,7 +14,7 @@ Original Canonical [Blog Post](https://ubuntu.com/blog/install-freepbx-and-aster
 
 Oracle Cloud AMD Always Free instance running Ubuntu 24.04 minimal. The only difficulty might be setting up appropriate ingress and egress rules; here's what our test setup looks like. 
 
-![Ingress Rules](docs/images/Ingress Rules.png)
+![Ingress Rules](docs/images/ingress-rules.png)
 
 ## Quick Start
 
