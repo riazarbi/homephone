@@ -1,0 +1,27 @@
+# Rate limiting for FreePBX - exempts localhost (SSH tunnel access)
+
+<IfModule mod_ratelimit.c>
+  # Protect login and admin pages
+  <LocationMatch "^/(admin/)?config\.php">
+    <If "%{REMOTE_ADDR} != '127.0.0.1' && %{REMOTE_ADDR} !~ /^::1$/">
+      SetOutputFilter RATE_LIMIT
+      SetEnv rate-limit 400
+    </If>
+  </LocationMatch>
+
+  # Protect REST API endpoints
+  <LocationMatch "^/rest/">
+    <If "%{REMOTE_ADDR} != '127.0.0.1' && %{REMOTE_ADDR} !~ /^::1$/">
+      SetOutputFilter RATE_LIMIT
+      SetEnv rate-limit 800
+    </If>
+  </LocationMatch>
+
+  # Protect admin area
+  <LocationMatch "^/admin/">
+    <If "%{REMOTE_ADDR} != '127.0.0.1' && %{REMOTE_ADDR} !~ /^::1$/">
+      SetOutputFilter RATE_LIMIT
+      SetEnv rate-limit 600
+    </If>
+  </LocationMatch>
+</IfModule>

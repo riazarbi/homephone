@@ -1,0 +1,876 @@
+---
+# Ubuntu PBX Ansible Playbook
+# ===========================
+#
+# This playbook installs and configures FreePBX 17 on Ubuntu 24.04 LTS.
+# It mirrors the functionality of cloud-init.yaml in an Ansible-native format.
+#
+# Usage:
+#   1. Edit vars.yml with your configuration
+#   2. Edit inventory.yml with your target server(s)
+#   3. Run: ansible-playbook -i inventory.yml playbook.yml
+#
+# Requirements:
+#   - Ubuntu 24.04 LTS (Noble Numbat)
+#   - SSH access with sudo privileges
+#   - Ansible 2.9+ on the control machine
+#   - community.general collection: ansible-galaxy collection install community.general
+
+- name: Install and Configure Ubuntu PBX with FreePBX 17
+  hosts: all
+  become: true
+  vars_files:
+    - vars.yml
+
+  pre_tasks:
+    - name: Check if .env file exists
+      ansible.builtin.stat:
+        path: "{{ playbook_dir }}/.env"
+      register: env_file
+      delegate_to: localhost
+      become: false
+
+    - name: Load SMTP password from .env file
+      ansible.builtin.set_fact:
+        smtp_password: "{{ lookup('file', playbook_dir + '/.env') | regex_search('SMTP_PASSWORD=(.+)', '\\1') | first }}"
+      when: env_file.stat.exists
+      delegate_to: localhost
+      become: false
+
+    - name: Build fail2ban ignore IP list
+      ansible.builtin.set_fact:
+        fail2ban_ignoreips: >-
+          {{ user_ips }}
+          {{ sip_provider_ips }}
+
+  tasks:
+    # ==========================================================================
+    # SECTION 1: SYSTEM SETUP
+    # ==========================================================================
+    # Sets up basic system configuration: hostname, timezone, swap, and users
+
+    - name: Set system hostname
+      ansible.builtin.hostname:
+        name: "{{ hostname }}"
+
+    - name: Set FQDN in /etc/hosts
+      ansible.builtin.lineinfile:
+        path: /etc/hosts
+        regexp: '^127\.0\.1\.1'
+        line: "127.0.1.1 {{ fqdn }} {{ hostname }}"
+        state: present
+
+    - name: Set timezone
+      community.general.timezone:
+        name: "{{ timezone }}"
+      when: timezone != "" and "/" in timezone
+
+    - name: Create asterisk user
+      ansible.builtin.user:
+        name: asterisk
+        comment: "Asterisk User"
+        groups: users
+        shell: /bin/bash
+        create_home: true
+
+    - name: Check if swap is already active
+      ansible.builtin.shell: swapon --show | grep -q .
+      register: swap_active
+      changed_when: false
+      failed_when: false
+
+    - name: Create and configure swap file
+      when: swap_active.rc != 0
+      block:
+        - name: Create 2GB swap file
+          ansible.builtin.command: fallocate -l 2G /swapfile
+          args:
+            creates: /swapfile
+
+        - name: Set swap file permissions
+          ansible.builtin.file:
+            path: /swapfile
+            mode: "0600"
+
+        - name: Format swap file
+          ansible.builtin.command: mkswap /swapfile
+          register: mkswap_result
+          changed_when: mkswap_result.rc == 0
+          failed_when: false
+
+        - name: Enable swap file
+          ansible.builtin.command: swapon /swapfile
+          changed_when: true
+          failed_when: false
+
+        - name: Add swap to fstab
+          ansible.builtin.lineinfile:
+            path: /etc/fstab
+            line: "/swapfile none swap sw 0 0"
+            state: present
+
+
+    # ==========================================================================
+    # SECTION 2: UBUNTU PRO
+    # ==========================================================================
+    # Attaches Ubuntu Pro token and enables security features (if configured)
+
+    - name: Attach Ubuntu Pro token
+      ansible.builtin.command: pro attach {{ ubuntu_pro_token }}
+      when: ubuntu_pro_token != ""
+      register: pro_attach
+      changed_when: "'This machine is now attached' in pro_attach.stdout"
+      failed_when: false
+
+    - name: Check Ubuntu Pro status
+      ansible.builtin.command: pro status --format yaml
+      register: pro_status
+      changed_when: false
+      failed_when: false
+
+    - name: Enable esm-infra if attached but disabled
+      ansible.builtin.command: pro enable esm-infra
+      when: >
+        pro_status.stdout is defined and
+        'attached: true' in pro_status.stdout and
+        'name: esm-infra' in pro_status.stdout
+      changed_when: true
+      failed_when: false
+
+    - name: Enable esm-apps if attached but disabled
+      ansible.builtin.command: pro enable esm-apps
+      when: >
+        pro_status.stdout is defined and
+        'attached: true' in pro_status.stdout and
+        'name: esm-apps' in pro_status.stdout
+      changed_when: true
+      failed_when: false
+
+    - name: Enable livepatch if attached but disabled
+      ansible.builtin.command: pro enable livepatch
+      when: >
+        pro_status.stdout is defined and
+        'attached: true' in pro_status.stdout and
+        'name: livepatch' in pro_status.stdout
+      changed_when: true
+      failed_when: false
+
+    # ==========================================================================
+    # SECTION 3: APT CONFIGURATION
+    # ==========================================================================
+    # Configures automatic security updates and package sources
+
+    - name: Create apt-daily-upgrade timer override directory
+      ansible.builtin.file:
+        path: /etc/systemd/system/apt-daily-upgrade.timer.d
+        state: directory
+        mode: "0755"
+
+    - name: Configure apt-daily-upgrade timer
+      ansible.builtin.template:
+        src: templates/apt-daily-upgrade-override.conf.j2
+        dest: /etc/systemd/system/apt-daily-upgrade.timer.d/override.conf
+        mode: "0644"
+
+    - name: Deploy APT periodic configuration
+      ansible.builtin.template:
+        src: templates/apt-periodic.conf.j2
+        dest: /etc/apt/apt.conf.d/10periodic
+        mode: "0644"
+
+    - name: Configure unattended-upgrades - Remove unused kernel packages
+      ansible.builtin.lineinfile:
+        path: /etc/apt/apt.conf.d/50unattended-upgrades
+        regexp: '^//\s*Unattended-Upgrade::Remove-Unused-Kernel-Packages'
+        line: 'Unattended-Upgrade::Remove-Unused-Kernel-Packages "true";'
+        state: present
+
+    - name: Configure unattended-upgrades - Remove new unused dependencies
+      ansible.builtin.lineinfile:
+        path: /etc/apt/apt.conf.d/50unattended-upgrades
+        regexp: '^//\s*Unattended-Upgrade::Remove-New-Unused-Dependencies'
+        line: 'Unattended-Upgrade::Remove-New-Unused-Dependencies "true";'
+        state: present
+
+    - name: Configure unattended-upgrades - Remove unused dependencies
+      ansible.builtin.lineinfile:
+        path: /etc/apt/apt.conf.d/50unattended-upgrades
+        regexp: '^//\s*Unattended-Upgrade::Remove-Unused-Dependencies'
+        line: 'Unattended-Upgrade::Remove-Unused-Dependencies "true";'
+        state: present
+
+    - name: Configure unattended-upgrades - Automatic reboot
+      ansible.builtin.lineinfile:
+        path: /etc/apt/apt.conf.d/50unattended-upgrades
+        regexp: '^//\s*Unattended-Upgrade::Automatic-Reboot\s'
+        line: 'Unattended-Upgrade::Automatic-Reboot "true";'
+        state: present
+
+    - name: Configure unattended-upgrades - Reboot with users
+      ansible.builtin.lineinfile:
+        path: /etc/apt/apt.conf.d/50unattended-upgrades
+        regexp: '^//\s*Unattended-Upgrade::Automatic-Reboot-WithUsers'
+        line: 'Unattended-Upgrade::Automatic-Reboot-WithUsers "true";'
+        state: present
+
+    - name: Configure unattended-upgrades - Reboot time
+      ansible.builtin.lineinfile:
+        path: /etc/apt/apt.conf.d/50unattended-upgrades
+        regexp: '^//\s*Unattended-Upgrade::Automatic-Reboot-Time'
+        line: 'Unattended-Upgrade::Automatic-Reboot-Time "{{ security_reboot_time }}";'
+        state: present
+
+    - name: Add ondrej/php PPA for PHP 8.2
+      ansible.builtin.apt_repository:
+        repo: ppa:ondrej/php
+        state: present
+      when: php_version == "8.2"
+
+    - name: Update apt cache
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Upgrade all packages
+      ansible.builtin.apt:
+        upgrade: dist
+        autoremove: true
+
+    # ==========================================================================
+    # SECTION 4: INSTALL PACKAGES
+    # ==========================================================================
+    # Installs all required packages for FreePBX
+
+    - name: Install required packages
+      ansible.builtin.apt:
+        name:
+          - apache2
+          - asterisk
+          - asterisk-mp3
+          - asterisk-moh-opsound-wav
+          - asterisk-moh-opsound-gsm
+          - asterisk-moh-opsound-g722
+          - cron
+          - fail2ban
+          - ffmpeg
+          - lame
+          - mariadb-server
+          - mariadb-client
+          - mpg123
+          - needrestart
+          - nodejs
+          - npm
+          - htop
+          - odbc-mariadb
+          - libicu-dev
+          - pkg-config 
+          - pkgconf
+          - php-pear
+          - "php{{ php_version }}"
+          - "php{{ php_version }}-cli"
+          - "php{{ php_version }}-common"
+          - "php{{ php_version }}-curl"
+          - "php{{ php_version }}-gd"
+          - "php{{ php_version }}-intl"
+          - "php{{ php_version }}-mbstring"
+          - "php{{ php_version }}-mysql"
+          - "php{{ php_version }}-soap"
+          - "php{{ php_version }}-xml"
+          - libsasl2-modules
+          - postfix
+          - procps
+          - sox
+          - ufw
+          - unixodbc
+        state: present
+
+    - name: Configure needrestart for automatic restarts
+      ansible.builtin.lineinfile:
+        path: /etc/needrestart/needrestart.conf
+        regexp: '^#?\$nrconf\{restart\}'
+        line: "$nrconf{restart} = 'a';"
+        state: present
+
+    # ==========================================================================
+    # SECTION 5: CONFIGURE POSTFIX
+    # ==========================================================================
+    # Sets up email relay through external SMTP server (if configured)
+
+    - name: Deploy Postfix SASL credentials
+      ansible.builtin.template:
+        src: templates/postfix-sasl-passwd.j2
+        dest: /etc/postfix/sasl_passwd
+        mode: "0400"
+      when: smtp_host != ""
+
+    - name: Configure Postfix settings
+      ansible.builtin.command: "postconf -e {{ item }}"
+      loop:
+        - 'myhostname="{{ fqdn }}"'
+        - 'mydomain="{{ domain }}"'
+        - 'myorigin="{{ domain }}"'
+        - 'masquerade_domains="{{ domain }}"'
+        - 'mydestination=localhost'
+        - 'default_transport=smtp'
+        - 'relay_transport=smtp'
+        - 'relayhost="[{{ smtp_host }}]:{{ smtp_port }}"'
+        - 'smtp_sasl_auth_enable=yes'
+        - 'smtp_sasl_password_maps=hash:/etc/postfix/sasl_passwd'
+        - 'header_size_limit=4096000'
+        - 'smtp_sasl_security_options=noanonymous'
+        - 'smtp_sasl_tls_security_options=noanonymous'
+        - 'smtp_tls_security_level=encrypt'
+        - 'smtp_tls_wrappermode=yes'
+        - 'smtp_use_tls=yes'
+        - 'sender_canonical_classes=envelope_sender'
+        - 'sender_canonical_maps=regexp:/etc/postfix/sender_canonical'
+        - 'smtp_header_checks=regexp:/etc/postfix/smtp_header_checks'
+      when: smtp_host != ""
+      changed_when: true
+
+    - name: Create Postfix envelope sender rewrite map
+      ansible.builtin.copy:
+        dest: /etc/postfix/sender_canonical
+        content: |
+          /.*/    {{ smtp_username }}
+        mode: "0644"
+      when: smtp_host != ""
+
+    - name: Create Postfix header rewrite map
+      ansible.builtin.copy:
+        dest: /etc/postfix/smtp_header_checks
+        content: |
+          /^From:.*/ REPLACE From: Homephone <{{ notification_email }}>
+          /^Reply-To:.*@{{ hostname }}/ REPLACE Reply-To: <{{ notification_email }}>
+        mode: "0644"
+      when: smtp_host != ""
+
+    - name: Generate Postfix password hash
+      ansible.builtin.command: postmap /etc/postfix/sasl_passwd
+      when: smtp_host != ""
+      changed_when: true
+
+    - name: Remove plaintext SASL password file
+      ansible.builtin.file:
+        path: /etc/postfix/sasl_passwd
+        state: absent
+      when: smtp_host != ""
+
+    - name: Restart Postfix service
+      ansible.builtin.systemd:
+        name: postfix
+        state: restarted
+      when: smtp_host != ""
+
+    # ==========================================================================
+    # SECTION 6: CONFIGURE PHP & APACHE
+    # ==========================================================================
+    # Configures PHP settings and Apache for FreePBX
+
+    - name: Remove PHP 8.3 if using PHP 8.2
+      ansible.builtin.apt:
+        name: php8.3
+        state: absent
+        purge: true
+      when: php_version == "8.2"
+
+    - name: Remove PHP 8.3 config directory
+      ansible.builtin.file:
+        path: /etc/php/8.3
+        state: absent
+      when: php_version == "8.2"
+
+    - name: Enable PHP 8.2 Apache module
+      ansible.builtin.command: a2enmod php8.2
+      when: php_version == "8.2"
+      changed_when: true
+      failed_when: false
+
+    - name: Set PHP as default version
+      ansible.builtin.command: update-alternatives --set php /usr/bin/php{{ php_version }}
+      when: php_version == "8.2"
+      changed_when: true
+      failed_when: false
+
+    - name: Configure PHP upload_max_filesize
+      ansible.builtin.lineinfile:
+        path: "/etc/php/{{ php_version }}/apache2/php.ini"
+        regexp: '^upload_max_filesize\s*='
+        line: "upload_max_filesize = 20M"
+        state: present
+
+    - name: Configure PHP memory_limit
+      ansible.builtin.lineinfile:
+        path: "/etc/php/{{ php_version }}/apache2/php.ini"
+        regexp: '^memory_limit\s*='
+        line: "memory_limit = 256M"
+        state: present
+
+    - name: Configure Apache to run as asterisk user
+      ansible.builtin.lineinfile:
+        path: /etc/apache2/apache2.conf
+        regexp: "{{ item.regexp }}"
+        line: "{{ item.line }}"
+        state: present
+      loop:
+        - { regexp: '^User\s', line: "User asterisk" }
+        - { regexp: '^Group\s', line: "Group asterisk" }
+
+    - name: Enable Apache AllowOverride
+      ansible.builtin.replace:
+        path: /etc/apache2/apache2.conf
+        regexp: 'AllowOverride None'
+        replace: 'AllowOverride All'
+
+    - name: Enable Apache mod_rewrite
+      ansible.builtin.command: a2enmod rewrite
+      changed_when: true
+      failed_when: false
+
+    - name: Enable Apache mod_ratelimit
+      ansible.builtin.command: a2enmod ratelimit
+      changed_when: true
+      failed_when: false
+
+    - name: Deploy Apache rate limiting configuration
+      ansible.builtin.template:
+        src: templates/apache-ratelimit.conf.j2
+        dest: /etc/apache2/conf-available/ratelimit.conf
+        mode: "0644"
+
+    - name: Enable Apache rate limiting configuration
+      ansible.builtin.command: a2enconf ratelimit
+      changed_when: true
+      failed_when: false
+
+    - name: Remove default Apache index page
+      ansible.builtin.file:
+        path: /var/www/html/index.html
+        state: absent
+
+    - name: Restart Apache service
+      ansible.builtin.systemd:
+        name: apache2
+        state: restarted
+
+    # ==========================================================================
+    # SECTION 7: CONFIGURE ASTERISK
+    # ==========================================================================
+    # Sets up Asterisk permissions, directories, and ODBC
+
+    - name: Set ownership on Asterisk directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        owner: asterisk
+        group: asterisk
+        recurse: true
+      loop:
+        - /etc/asterisk
+        - /var/lib/asterisk
+        - /var/log/asterisk
+        - /var/spool/asterisk
+
+    - name: Enable AST_USER in /etc/default/asterisk
+      ansible.builtin.lineinfile:
+        path: /etc/default/asterisk
+        regexp: '^#AST_USER'
+        line: "AST_USER=\"asterisk\""
+        state: present
+
+    - name: Enable AST_GROUP in /etc/default/asterisk
+      ansible.builtin.lineinfile:
+        path: /etc/default/asterisk
+        regexp: '^#AST_GROUP'
+        line: "AST_GROUP=\"asterisk\""
+        state: present
+
+    - name: Enable runuser in asterisk.conf
+      ansible.builtin.lineinfile:
+        path: /etc/asterisk/asterisk.conf
+        regexp: '^;runuser'
+        line: "runuser = asterisk"
+        state: present
+
+    - name: Enable rungroup in asterisk.conf
+      ansible.builtin.lineinfile:
+        path: /etc/asterisk/asterisk.conf
+        regexp: '^;rungroup'
+        line: "rungroup = asterisk"
+        state: present
+
+    - name: Run ldconfig
+      ansible.builtin.command: ldconfig
+      changed_when: false
+
+    - name: Stop Asterisk service before FreePBX install
+      ansible.builtin.systemd:
+        name: asterisk
+        state: stopped
+      failed_when: false
+
+    - name: Remove existing sounds custom symlink
+      ansible.builtin.file:
+        path: /usr/share/asterisk/sounds/custom
+        state: absent
+
+    - name: Create sounds custom symlink
+      ansible.builtin.file:
+        src: /var/lib/asterisk/sounds/en/custom
+        dest: /usr/share/asterisk/sounds/custom
+        state: link
+        force: true
+
+    - name: Create MOH symlink for FreePBX
+      ansible.builtin.file:
+        src: /usr/share/asterisk/moh
+        dest: /var/lib/asterisk/moh/asterisk-moh-opsound
+        state: link
+        force: true
+
+    - name: Set ownership on MOH directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        owner: asterisk
+        group: asterisk
+        recurse: true
+      loop:
+        - /usr/share/asterisk/moh
+        - /var/lib/asterisk/moh
+
+    - name: Deploy ODBC configuration
+      ansible.builtin.template:
+        src: templates/odbcinst.ini.j2
+        dest: /etc/odbcinst.ini
+        mode: "0644"
+
+    # ==========================================================================
+    # SECTION 8: INSTALL FREEPBX
+    # ==========================================================================
+    # Downloads, installs, and configures FreePBX 17
+
+    - name: Check if FreePBX is already installed
+      ansible.builtin.stat:
+        path: /etc/freepbx.conf
+      register: freepbx_installed
+
+    - name: Download FreePBX 17
+      ansible.builtin.get_url:
+        url: http://mirror.freepbx.org/modules/packages/freepbx/freepbx-17.0-latest.tgz
+        dest: /var/tmp/freepbx-17.0-latest.tgz
+        mode: "0644"
+      when: not freepbx_installed.stat.exists
+
+    - name: Extract FreePBX archive
+      ansible.builtin.unarchive:
+        src: /var/tmp/freepbx-17.0-latest.tgz
+        dest: /usr/src
+        remote_src: true
+      when: not freepbx_installed.stat.exists
+
+    - name: Start Asterisk for FreePBX installation
+      ansible.builtin.command: ./start_asterisk start
+      args:
+        chdir: /usr/src/freepbx
+      changed_when: true
+      when: not freepbx_installed.stat.exists
+
+    - name: Wait for Asterisk to be ready
+      ansible.builtin.shell: |
+        while asterisk -rx 'core show version' 2>&1 | grep -Eq '(Unable to connect to remote asterisk|No such command)'; do
+          echo 'Waiting for Asterisk core to be available'
+          sleep 2
+        done
+      args:
+        executable: /bin/bash
+      changed_when: false
+      when: not freepbx_installed.stat.exists
+
+    - name: Run FreePBX installer
+      ansible.builtin.command: ./install -n
+      args:
+        chdir: /usr/src/freepbx
+      register: freepbx_install_result
+      # FreePBX installer may return non-zero even on success (npm warnings, etc.)
+      failed_when: "'You have successfully installed FreePBX' not in freepbx_install_result.stdout"
+      changed_when: true
+      when: not freepbx_installed.stat.exists
+
+    - name: Fix ODBC socket path for Ubuntu Noble
+      ansible.builtin.lineinfile:
+        path: /etc/odbc.ini
+        regexp: 'Socket=/var/lib/mysql/mysql.sock'
+        line: "Socket=/run/mysqld/mysqld.sock"
+        state: present
+
+    - name: Enable FreePBX standard module repository
+      ansible.builtin.command: fwconsole ma enablerepo standard
+      changed_when: true
+
+    - name: Refresh module index from repository
+      ansible.builtin.shell: fwconsole ma listonline > /dev/null 2>&1
+      changed_when: true
+
+    - name: Install additional FreePBX modules not in base install
+      ansible.builtin.command: fwconsole ma downloadinstall asteriskinfo timeconditions
+      changed_when: true
+
+    - name: Upgrade all FreePBX modules to latest versions
+      ansible.builtin.command: fwconsole ma upgradeall
+      changed_when: true
+
+    - name: Deploy FreePBX systemd service
+      ansible.builtin.template:
+        src: templates/freepbx.service.j2
+        dest: /etc/systemd/system/freepbx.service
+        mode: "0644"
+
+    - name: Enable and start FreePBX service
+      ansible.builtin.systemd:
+        name: freepbx
+        enabled: true
+        state: started
+        daemon_reload: true
+
+    # ==========================================================================
+    # SECTION 9: CONFIGURE SECURITY
+    # ==========================================================================
+    # Sets up fail2ban, security logging, and firewall rules
+
+    - name: Create Asterisk security log file
+      ansible.builtin.copy:
+        content: "---LOG BEGINS---\n"
+        dest: /var/log/asterisk/asterisk_security.log
+        owner: asterisk
+        group: asterisk
+        mode: "0664"
+        force: false
+
+    - name: Create FreePBX security log file
+      ansible.builtin.copy:
+        content: "---LOG BEGINS---\n"
+        dest: /var/log/asterisk/freepbx_security.log
+        owner: asterisk
+        group: asterisk
+        mode: "0664"
+        force: false
+
+    - name: Get public IP address
+      ansible.builtin.uri:
+        url: https://checkip.amazonaws.com
+        return_content: true
+      register: public_ip
+      failed_when: false
+
+    - name: Add public IP to fail2ban ignoreips
+      ansible.builtin.set_fact:
+        fail2ban_ignoreips: "{{ fail2ban_ignoreips }} {{ public_ip.content | trim }}"
+      when: public_ip.content is defined and public_ip.content | trim != ""
+
+    - name: Deploy fail2ban jail configuration
+      ansible.builtin.template:
+        src: templates/fail2ban-jail.local.j2
+        dest: /etc/fail2ban/jail.local
+        mode: "0644"
+
+    - name: Deploy fail2ban FreePBX filter
+      ansible.builtin.template:
+        src: templates/fail2ban-freepbx-filter.j2
+        dest: /etc/fail2ban/filter.d/freepbx.conf
+        mode: "0644"
+
+    - name: Deploy logrotate configuration for Asterisk
+      ansible.builtin.template:
+        src: templates/logrotate-asterisk.j2
+        dest: /etc/logrotate.d/asterisk-custom
+        mode: "0644"
+
+    # --------------------------------------------------------------------------
+    # STEP 1: CLEAR PRE-EXISTING IPTABLES RULES
+    # --------------------------------------------------------------------------
+    # Oracle Cloud Ubuntu images ship with iptables rules that REJECT all
+    # traffic except SSH. These rules appear before UFW's chains, making UFW
+    # ineffective. We must flush them before enabling UFW.
+    #
+    # Safe sequence:
+    #   1. Stop netfilter-persistent (prevents Oracle rules from reloading)
+    #   2. Set default policies to ACCEPT (keeps SSH alive through the flush)
+    #   3. Flush all rules (server briefly accepts all traffic)
+    #   4. Configure and enable UFW (restores proper filtering)
+
+    - name: Stop and disable netfilter-persistent
+      ansible.builtin.systemd:
+        name: netfilter-persistent
+        enabled: false
+        state: stopped
+      failed_when: false
+
+    - name: Set iptables default policies to ACCEPT before flush
+      ansible.builtin.iptables:
+        chain: "{{ item }}"
+        policy: ACCEPT
+      loop:
+        - INPUT
+        - FORWARD
+        - OUTPUT
+      failed_when: false
+
+    - name: Flush pre-existing iptables rules
+      ansible.builtin.iptables:
+        flush: true
+        table: "{{ item }}"
+      loop:
+        - filter
+        - nat
+        - mangle
+      failed_when: false
+
+    # --------------------------------------------------------------------------
+    # STEP 2: UFW FIREWALL
+    # --------------------------------------------------------------------------
+    # Now that iptables is clean, UFW's chains will be first in the INPUT
+    # chain with no pre-existing REJECT rules blocking traffic.
+
+    - name: Set ufw default policy (deny incoming, allow outgoing)
+      community.general.ufw:
+        direction: "{{ item.direction }}"
+        policy: "{{ item.policy }}"
+      loop:
+        - { direction: incoming, policy: deny }
+        - { direction: outgoing, policy: allow }
+      when: enable_ufw
+
+    - name: Allow SSH (port 22)
+      community.general.ufw:
+        rule: allow
+        port: "22"
+        proto: tcp
+        comment: "SSH"
+      when: enable_ufw
+
+    - name: Allow SIP (port 5060/udp)
+      community.general.ufw:
+        rule: allow
+        port: "5060"
+        proto: udp
+        comment: "SIP signaling"
+      when: enable_ufw
+
+    - name: Allow RTP (ports 10000-20000/udp)
+      community.general.ufw:
+        rule: allow
+        port: "10000:20000"
+        proto: udp
+        comment: "RTP voice traffic"
+      when: enable_ufw
+
+    - name: Allow web UI (port 80) if enabled
+      community.general.ufw:
+        rule: allow
+        port: "80"
+        proto: tcp
+        comment: "FreePBX web UI"
+      when: enable_ufw and ufw_allow_web
+
+    - name: Enable ufw
+      community.general.ufw:
+        state: enabled
+      when: enable_ufw
+
+    - name: Restart fail2ban service
+      ansible.builtin.systemd:
+        name: fail2ban
+        state: restarted
+
+    # ==========================================================================
+    # SECTION 10: RESTORE & FINISH
+    # ==========================================================================
+    # Deploys crontab, restores backups, configures trunks, and finalizes setup
+
+    - name: Deploy crontab template
+      ansible.builtin.template:
+        src: templates/crontab.j2
+        dest: /root/schedule.txt
+        mode: "0644"
+
+    - name: Install crontab
+      ansible.builtin.command: crontab /root/schedule.txt
+      changed_when: true
+
+    - name: Remove temporary crontab file
+      ansible.builtin.file:
+        path: /root/schedule.txt
+        state: absent
+
+    - name: Create backup directory
+      ansible.builtin.file:
+        path: /var/spool/asterisk/backup
+        state: directory
+        owner: asterisk
+        group: asterisk
+        mode: "0755"
+
+    - name: Upload asterisklogs backup
+      ansible.builtin.copy:
+        src: files/ubuntupbx.asterisklogs.backup.tar.gz
+        dest: /var/spool/asterisk/backup/ubuntupbx.asterisklogs.backup.tar.gz
+        mode: "0644"
+
+    - name: Restore asterisklogs backup (prepares system for fail2ban)
+      ansible.builtin.command: fwconsole backup --restore='/var/spool/asterisk/backup/ubuntupbx.asterisklogs.backup.tar.gz' --skiprestorehooks
+      register: asterisklogs_restore
+      changed_when: true
+      # FreePBX backup module has a bug where proc_open fails at the end, but restore completes successfully
+      failed_when: "'Restore processing for modules are finished successfully' not in asterisklogs_restore.stdout"
+
+    - name: Download core backup (https URL)
+      ansible.builtin.get_url:
+        url: "{{ restore_backup }}"
+        dest: /var/spool/asterisk/backup/restored-at-first-boot.tar.gz
+        mode: "0644"
+      when: restore_backup != "" and restore_backup.startswith('https://')
+
+    - name: Download core backup (Google Cloud Storage)
+      ansible.builtin.command: gcloud storage cp {{ restore_backup }} /var/spool/asterisk/backup/restored-at-first-boot.tar.gz
+      when: restore_backup != "" and restore_backup.startswith('gs://')
+      changed_when: true
+
+    - name: Restore core backup
+      ansible.builtin.command: fwconsole backup --restore='/var/spool/asterisk/backup/restored-at-first-boot.tar.gz' --skiprestorehooks
+      register: core_restore
+      when: restore_backup != ""
+      changed_when: true
+      failed_when: "restore_backup != '' and 'Restore processing for modules are finished successfully' not in core_restore.stdout"
+
+    - name: Run fwconsole chown
+      ansible.builtin.command: fwconsole chown
+      changed_when: true
+
+    - name: Run fwconsole restart
+      ansible.builtin.command: fwconsole restart
+      changed_when: true
+
+    - name: Run fwconsole reload
+      ansible.builtin.command: fwconsole reload
+      changed_when: true
+
+    - name: Display completion message
+      ansible.builtin.debug:
+        msg: |
+          ============================================
+          Ubuntu PBX Installation Complete!
+          ============================================
+
+          FreePBX Web UI: http://{{ ansible_host }}/
+
+          Verify installation:
+            - systemctl status freepbx
+            - systemctl status asterisk
+            - fail2ban-client status
+            - fwconsole ma list
+
+          Next steps:
+            1. Access the web UI and create an admin user
+            2. Configure your SIP trunk credentials
+            3. Create extensions and inbound routes
+
+          ============================================

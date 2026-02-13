@@ -1,0 +1,39 @@
+[DEFAULT]
+{% if notification_email %}
+destemail = {{ notification_email }}
+sender = no-reply@{{ domain }}
+{% endif %}
+ignoreip = 127.0.0.0/8 {{ fail2ban_ignoreips }}
+
+# Progressive ban settings (fail2ban 0.11+)
+bantime.increment = true
+bantime.factor = 2
+bantime.maxtime = 604800
+
+[sshd]
+enabled = true
+maxretry = 3
+findtime = 900
+bantime = 600
+action = iptables[name=sshd, port=22, protocol=tcp]
+
+[asterisk]
+enabled = true
+filter = asterisk
+backend = auto
+logpath = /var/log/asterisk/asterisk_security.log
+maxretry = 3
+findtime = 900
+bantime = 600
+action = iptables[name=asterisk, port=5060, protocol=udp]
+         %(action_mw)s
+
+[freepbx]
+enabled = true
+backend = auto
+logpath = /var/log/asterisk/freepbx_security.log
+maxretry = 3
+findtime = 900
+bantime = 600
+action = iptables[name=freepbx, port=80, protocol=tcp]
+         %(action_mw)s

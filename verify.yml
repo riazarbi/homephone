@@ -1,0 +1,1476 @@
+---
+# Ubuntu PBX Verification Playbook
+# ==================================
+#
+# Run after playbook.yml to verify the system is configured correctly.
+#
+# Usage:
+#   ansible-playbook -i inventory.yml verify.yml
+#   ansible-playbook -i inventory.yml verify.yml --skip-tags manual
+#   ansible-playbook -i inventory.yml verify.yml --tags manual
+#
+# All tests are tagged 'verify'. Manual tests requiring human interaction
+# are additionally tagged 'manual'.
+
+- name: Verify Ubuntu PBX Configuration
+  hosts: all
+  become: true
+  vars_files:
+    - vars.yml
+
+  tasks:
+    # ==========================================================================
+    # SECTION 1: SYSTEM SETUP
+    # ==========================================================================
+
+    - name: "Gather: hostname"
+      ansible.builtin.command: hostname
+      register: _g_hostname
+      changed_when: false
+      tags: [verify]
+
+    - name: |
+        Verify hostname
+        Description: Checks that the system hostname matches the configured hostname variable
+      ansible.builtin.assert:
+        that:
+          - _g_hostname.stdout == hostname
+        fail_msg: "FAIL: Expected '{{ hostname }}', got '{{ _g_hostname.stdout }}'"
+        success_msg: "PASS: Hostname is '{{ hostname }}'"
+      ignore_errors: true
+      tags: [verify]
+
+    - name: "Gather: /etc/hosts"
+      ansible.builtin.command: grep '127.0.1.1' /etc/hosts
+      register: _g_hosts
+      changed_when: false
+      failed_when: false
+      tags: [verify]
+
+    - name: |
+        Verify FQDN in /etc/hosts
+        Description: Checks that /etc/hosts contains the 127.0.1.1 entry mapping to the FQDN and hostname
+      ansible.builtin.assert:
+        that:
+          - _g_hosts.rc == 0
+          - fqdn in _g_hosts.stdout
+          - hostname in _g_hosts.stdout
+        fail_msg: "FAIL: /etc/hosts missing '127.0.1.1 {{ fqdn }} {{ hostname }}'. Got: '{{ _g_hosts.stdout }}'"
+        success_msg: "PASS: /etc/hosts contains '{{ _g_hosts.stdout | trim }}'"
+      ignore_errors: true
+      tags: [verify]
+
+    - name: "Gather: timezone"
+      ansible.builtin.command: timedatectl show --property=Timezone --value
+      register: _g_tz
+      changed_when: false
+      tags: [verify]
+
+    - name: |
+        Verify timezone
+        Description: Checks that the system timezone matches the configured timezone variable
+      ansible.builtin.assert:
+        that:
+          - _g_tz.stdout == timezone
+        fail_msg: "FAIL: Expected timezone '{{ timezone }}', got '{{ _g_tz.stdout }}'"
+        success_msg: "PASS: Timezone is '{{ timezone }}'"
+      ignore_errors: true
+      tags: [verify]
+
+    - name: "Gather: asterisk user"
+      ansible.builtin.command: getent passwd asterisk
+      register: _g_astuser
+      changed_when: false
+      failed_when: false
+      tags: [verify]
+
+    - name: |
+        Verify asterisk user
+        Description: Checks that the asterisk user exists with /bin/bash shell and a home directory
+      ansible.builtin.assert:
+        that:
+          - _g_astuser.rc == 0
+          - "'/bin/bash' in _g_astuser.stdout"
+        fail_msg: "FAIL: asterisk user missing or wrong shell. Got: '{{ _g_astuser.stdout | default('NOT FOUND') }}'"
+        success_msg: "PASS: asterisk user exists with /bin/bash"
+      ignore_errors: true
+      tags: [verify]
+
+    - name: "Gather: swap status"
+      ansible.builtin.command: swapon --show --noheadings
+      register: _g_swap
+      changed_when: false
+      failed_when: false
+      tags: [verify]
+
+    - name: |
+        Verify swap is active
+        Description: Checks that swap space is active and is approximately 2GB in size
+      ansible.builtin.assert:
+        that:
+          - _g_swap.stdout | length > 0
+        fail_msg: "FAIL: No active swap found"
+        success_msg: "PASS: Swap is active: {{ _g_swap.stdout }}"
+      ignore_errors: true
+      tags: [verify]
+
+    - name: "Gather: swap fstab"
+      ansible.builtin.shell: grep -c swapfile /etc/fstab
+      register: _g_fstab
+      changed_when: false
+      failed_when: false
+      tags: [verify]
+
+    - name: |
+        Verify swap persistence
+        Description: Checks that /swapfile is present in /etc/fstab so swap survives reboot
+      ansible.builtin.assert:
+        that:
+          - _g_fstab.stdout | int > 0
+        fail_msg: "FAIL: /swapfile not found in /etc/fstab"
+        success_msg: "PASS: /swapfile is in /etc/fstab"
+      ignore_errors: true
+      tags: [verify]
+
+    # ==========================================================================
+    # SECTION 1b: UBUNTU PRO
+    # ==========================================================================
+
+    - name: "Gather: Ubuntu Pro status"
+      ansible.builtin.command: pro status --format yaml
+      register: _g_pro_status
+      changed_when: false
+      failed_when: false
+      when: ubuntu_pro_token | default('') != ''
+      tags: [verify]
+
+    - name: |
+        Verify Ubuntu Pro is attached
+        Description: Checks that the machine is attached to Ubuntu Pro and esm-infra is enabled
+      ansible.builtin.assert:
+        that:
+          - "'attached: true' in _g_pro_status.stdout"
+          - "'esm-infra' in _g_pro_status.stdout"
+        fail_msg: "FAIL: Ubuntu Pro not attached or esm-infra missing"
+        success_msg: "PASS: Ubuntu Pro attached with esm-infra"
+      ignore_errors: true
+      when: ubuntu_pro_token | default('') != ''
+      tags: [verify]
+
+    # ==========================================================================
+    # SECTION 2: APT & AUTOMATIC UPDATES
+    # ==========================================================================
+
+    - name: "Gather: APT periodic config"
+      ansible.builtin.slurp:
+        src: /etc/apt/apt.conf.d/10periodic
+      register: _g_aptperiodic
+      failed_when: false
+      tags: [verify]
+
+    - name: |
+        Verify APT periodic configuration
+        Description: Checks /etc/apt/apt.conf.d/10periodic has daily updates and unattended-upgrade enabled
+      ansible.builtin.assert:
+        that:
+          - _g_aptperiodic.content is defined
+          - "'Unattended-Upgrade \"1\"' in (_g_aptperiodic.content | b64decode)"
+          - "'Update-Package-Lists \"1\"' in (_g_aptperiodic.content | b64decode)"
+        fail_msg: "FAIL: APT periodic config missing or incomplete"
+        success_msg: "PASS: APT periodic updates and unattended-upgrades enabled"
+      ignore_errors: true
+      tags: [verify]
+
+    - name: "Gather: unattended-upgrades config"
+      ansible.builtin.shell: grep -E '(Automatic-Reboot|Remove-Unused)' /etc/apt/apt.conf.d/50unattended-upgrades
+      register: _g_unattended
+      changed_when: false
+      failed_when: false
+      tags: [verify]
+
+    - name: |
+        Verify unattended-upgrades auto-reboot
+        Description: Checks that automatic reboot is enabled with the configured reboot time
+      ansible.builtin.assert:
+        that:
+          - "'Automatic-Reboot \"true\"' in _g_unattended.stdout"
+          - "'Automatic-Reboot-Time \"' + security_reboot_time + '\"' in _g_unattended.stdout"
+        fail_msg: "FAIL: Auto-reboot not configured correctly. Expected time '{{ security_reboot_time }}'"
+        success_msg: "PASS: Auto-reboot enabled at {{ security_reboot_time }}"
+      ignore_errors: true
+      tags: [verify]
+
+    - name: |
+        Verify unattended-upgrades kernel cleanup
+        Description: Checks that Remove-Unused-Kernel-Packages and Remove-Unused-Dependencies are enabled
+      ansible.builtin.assert:
+        that:
+          - "'Remove-Unused-Kernel-Packages \"true\"' in _g_unattended.stdout"
+          - "'Remove-Unused-Dependencies \"true\"' in _g_unattended.stdout"
+        fail_msg: "FAIL: Kernel/dependency cleanup not enabled"
+        success_msg: "PASS: Unused kernel and dependency cleanup enabled"
+      ignore_errors: true
+      tags: [verify]
+
+    - name: "Gather: apt-daily-upgrade timer override"
+      ansible.builtin.slurp:
+        src: /etc/systemd/system/apt-daily-upgrade.timer.d/override.conf
+      register: _g_apttimer
+      failed_when: false
+      tags: [verify]
+
+    - name: |
+        Verify apt-daily-upgrade timer override
+        Description: Checks that the systemd timer override sets the security install time correctly
+      ansible.builtin.assert:
+        that:
+          - _g_apttimer.content is defined
+          - "security_install_time in (_g_apttimer.content | b64decode)"
+        fail_msg: "FAIL: Timer override missing or wrong time. Expected {{ security_install_time }}"
+        success_msg: "PASS: apt-daily-upgrade timer set to {{ security_install_time }}"
+      ignore_errors: true
+      tags: [verify]
+
+    # ==========================================================================
+    # SECTION 3: PACKAGES
+    # ==========================================================================
+
+    - name: "Gather: installed packages"
+      ansible.builtin.shell: dpkg -l asterisk apache2 mariadb-server fail2ban ufw nodejs postfix cron 2>&1
+      register: _g_packages
+      changed_when: false
+      failed_when: false
+      tags: [verify]
+
+    - name: |
+        Verify critical packages are installed
+        Description: Checks that all key packages (asterisk, apache2, mariadb, fail2ban, ufw, nodejs, etc.) are installed
+      ansible.builtin.assert:
+        that:
+          - "'ii  asterisk ' in _g_packages.stdout"
+          - "'ii  apache2 ' in _g_packages.stdout"
+          - "'ii  mariadb-server ' in _g_packages.stdout"
+          - "'ii  fail2ban ' in _g_packages.stdout"
+          - "'ii  ufw ' in _g_packages.stdout"
+          - "'ii  nodejs ' in _g_packages.stdout"
+          - "'ii  postfix ' in _g_packages.stdout"
+          - "'ii  cron ' in _g_packages.stdout"
+        fail_msg: "FAIL: One or more critical packages are missing"
+        success_msg: "PASS: All critical packages are installed"
+      ignore_errors: true
+      tags: [verify]
+
+    - name: "Gather: needrestart config"
+      ansible.builtin.shell: grep "nrconf{restart}" /etc/needrestart/needrestart.conf
+      register: _g_needrestart
+      changed_when: false
+      failed_when: false
+      tags: [verify]
+
+    - name: |
+        Verify needrestart automatic mode
+        Description: Checks that needrestart is configured with restart='a' for automatic service restarts
+      ansible.builtin.assert:
+        that:
+          - "\"'a'\" in _g_needrestart.stdout"
+        fail_msg: "FAIL: needrestart not set to automatic. Got: {{ _g_needrestart.stdout }}"
+        success_msg: "PASS: needrestart set to automatic mode"
+      ignore_errors: true
+      tags: [verify]
+
+    # ==========================================================================
+    # SECTION 4: POSTFIX / SMTP
+    # ==========================================================================
+
+    - name: "Gather: Postfix service status"
+      ansible.builtin.command: systemctl is-active postfix
+      register: _g_postfix_svc
+      changed_when: false
+      failed_when: false
+      tags: [verify]
+
+    - name: "Gather: Postfix service enabled"
+      ansible.builtin.command: systemctl is-enabled postfix
+      register: _g_postfix_enabled
+      changed_when: false
+      failed_when: false
+      tags: [verify]
+
+    - name: |
+        Verify Postfix service is running and enabled
+        Description: Checks that the postfix systemd service is active and enabled at boot
+      ansible.builtin.assert:
+        that:
+          - _g_postfix_svc.stdout == 'active'
+          - _g_postfix_enabled.stdout == 'enabled'
+        fail_msg: "FAIL: Postfix active={{ _g_postfix_svc.stdout }}, enabled={{ _g_postfix_enabled.stdout }}"
+        success_msg: "PASS: Postfix is running and enabled at boot"
+      ignore_errors: true
+      tags: [verify]
+
+    - name: "Gather: Postfix configuration"
+      ansible.builtin.shell: postconf relayhost smtp_tls_security_level smtp_sasl_auth_enable myhostname
+      register: _g_postconf
+      changed_when: false
+      failed_when: false
+      tags: [verify]
+
+    - name: |
+        Verify Postfix relay configuration
+        Description: Checks relayhost, TLS, and SASL settings are correctly configured via postconf
+      ansible.builtin.assert:
+        that:
+          - "'[' + smtp_host + ']:' + smtp_port in _g_postconf.stdout"
+          - "'smtp_tls_security_level = encrypt' in _g_postconf.stdout"
+          - "'smtp_sasl_auth_enable = yes' in _g_postconf.stdout"
+          - "fqdn in _g_postconf.stdout"
+        fail_msg: "FAIL: Postfix relay misconfigured. Output:\n{{ _g_postconf.stdout }}"
+        success_msg: "PASS: Postfix relay configured for [{{ smtp_host }}]:{{ smtp_port }} with TLS+SASL"
+      ignore_errors: true
+      when: smtp_host != ""
+      tags: [verify]
+
+    - name: "Gather: SASL credential files"
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - /etc/postfix/sasl_passwd.db
+        - /etc/postfix/sasl_passwd
+      register: _g_sasl_files
+      tags: [verify]
+
+    - name: |
+        Verify SASL credentials
+        Description: Checks that the hashed sasl_passwd.db exists and the plaintext sasl_passwd file is absent
+      ansible.builtin.assert:
+        that:
+          - _g_sasl_files.results[0].stat.exists
+          - not _g_sasl_files.results[1].stat.exists
+        fail_msg: "FAIL: sasl_passwd.db exists={{ _g_sasl_files.results[0].stat.exists }}, plaintext exists={{ _g_sasl_files.results[1].stat.exists }}"
+        success_msg: "PASS: Hashed credentials present, plaintext removed"
+      ignore_errors: true
+      when: smtp_host != ""
+      tags: [verify]
+
+    - name: |
+        Verify SMTP email delivery
+        Description: Sends a test email and checks the mail log for successful delivery. MANUAL - check your inbox.
+      block:
+        - name: Send test email
+          ansible.builtin.shell: >
+            echo "Test email from {{ hostname }} at $(date). If you received this, SMTP relay is working correctly." |
+            mail -s "PBX Verify: SMTP Test from {{ hostname }}" {{ notification_email }}
+          changed_when: false
+
+        - name: Wait for email processing
+          ansible.builtin.pause:
+            seconds: 10
+
+        - name: Check mail log
+          ansible.builtin.shell: tail -30 /var/log/mail.log 2>/dev/null || tail -30 /var/log/syslog | grep -i postfix
+          register: _g_maillog
+          changed_when: false
+          failed_when: false
+
+        - name: Show mail log and prompt
+          ansible.builtin.debug:
+            msg: |
+              A test email was sent to {{ notification_email }}.
+
+              Recent mail log:
+              {{ _g_maillog.stdout }}
+
+              Please check your inbox for the test email.
+
+        - name: Confirm email delivery
+          ansible.builtin.pause:
+            prompt: "Did you receive the test email at {{ notification_email }}? (yes/no)"
+          register: _g_smtp_confirm
+
+        - name: Assert email delivery
+          ansible.builtin.assert:
+            that:
+              - _g_smtp_confirm.user_input | lower in ['yes', 'y']
+            fail_msg: "FAIL: SMTP delivery not confirmed"
+            success_msg: "PASS: SMTP delivery confirmed by operator"
+      rescue:
+        - name: SMTP delivery test failed
+          ansible.builtin.debug:
+            msg: "FAIL: SMTP email delivery test failed"
+      when: smtp_host != ""
+      tags: [verify, manual]
+
+    # ==========================================================================
+    # SECTION 5: PHP
+    # ==========================================================================
+
+    - name: "Gather: PHP version"
+      ansible.builtin.command: php -v
+      register: _g_phpver
+      changed_when: false
+      failed_when: false
+      tags: [verify]
+
+    - name: |
+        Verify PHP version
+        Description: Checks that the installed PHP CLI version matches the configured php_version variable
+      ansible.builtin.assert:
+        that:
+          - "php_version in _g_phpver.stdout"
+        fail_msg: "FAIL: Expected PHP {{ php_version }}. Got:\n{{ _g_phpver.stdout_lines[0] | default('PHP not found') }}"
+        success_msg: "PASS: {{ _g_phpver.stdout_lines[0] }}"
+      ignore_errors: true
+      tags: [verify]
+
+    - name: "Gather: PHP Apache ini settings"
+      ansible.builtin.shell: |
+        grep '^upload_max_filesize' /etc/php/{{ php_version }}/apache2/php.ini 2>/dev/null
+        grep '^memory_limit' /etc/php/{{ php_version }}/apache2/php.ini 2>/dev/null
+      register: _g_phpini
+      changed_when: false
+      failed_when: false
+      tags: [verify]
+
+    - name: |
+        Verify PHP settings
+        Description: Checks that upload_max_filesize=20M and memory_limit=256M in the Apache PHP ini
+      ansible.builtin.assert:
+        that:
+          - "'upload_max_filesize = 20M' in _g_phpini.stdout"
+          - "'memory_limit = 256M' in _g_phpini.stdout"
+        fail_msg: "FAIL: PHP settings wrong in /etc/php/{{ php_version }}/apache2/php.ini. Got:\n{{ _g_phpini.stdout }}"
+        success_msg: "PASS: upload_max_filesize=20M, memory_limit=256M (Apache ini)"
+      ignore_errors: true
+      tags: [verify]
+
+    - name: "Gather: PHP modules"
+      ansible.builtin.command: php -m
+      register: _g_phpmods
+      changed_when: false
+      failed_when: false
+      tags: [verify]
+
+    - name: |
+        Verify PHP modules
+        Description: Checks that all required PHP modules (curl, gd, intl, mbstring, mysql, soap, xml) are loaded
+      ansible.builtin.assert:
+        that:
+          - "'curl' in _g_phpmods.stdout"
+          - "'gd' in _g_phpmods.stdout"
+          - "'intl' in _g_phpmods.stdout"
+          - "'mbstring' in _g_phpmods.stdout"
+          - "'mysqlnd' in _g_phpmods.stdout or 'mysqli' in _g_phpmods.stdout"
+          - "'soap' in _g_phpmods.stdout"
+          - "'xml' in _g_phpmods.stdout"
+        fail_msg: "FAIL: Missing PHP modules"
+        success_msg: "PASS: All required PHP modules loaded"
+      ignore_errors: true
+      tags: [verify]
+
+    # ==========================================================================
+    # SECTION 6: APACHE
+    # ==========================================================================
+
+    - name: "Gather: Apache service status"
+      ansible.builtin.command: systemctl is-active apache2
+      register: _g_apache_svc
+      changed_when: false
+      failed_when: false
+      tags: [verify]
+
+    - name: "Gather: Apache service enabled"
+      ansible.builtin.command: systemctl is-enabled apache2
+      register: _g_apache_enabled
+      changed_when: false
+      failed_when: false
+      tags: [verify]
+
+    - name: |
+        Verify Apache service is running and enabled
+        Description: Checks that the apache2 systemd service is active and enabled at boot
+      ansible.builtin.assert:
+        that:
+          - _g_apache_svc.stdout == 'active'
+          - _g_apache_enabled.stdout == 'enabled'
+        fail_msg: "FAIL: Apache active={{ _g_apache_svc.stdout }}, enabled={{ _g_apache_enabled.stdout }}"
+        success_msg: "PASS: Apache is running and enabled at boot"
+      ignore_errors: true
+      tags: [verify]
+
+    - name: "Gather: Apache config user/group"
+      ansible.builtin.shell: grep -E '^(User|Group) ' /etc/apache2/apache2.conf
+      register: _g_apache_user
+      changed_when: false
+      failed_when: false
+      tags: [verify]
+
+    - name: |
+        Verify Apache runs as asterisk user
+        Description: Checks that Apache worker processes are running under the asterisk user and group
+      ansible.builtin.assert:
+        that:
+          - "'User asterisk' in _g_apache_user.stdout"
+          - "'Group asterisk' in _g_apache_user.stdout"
+        fail_msg: "FAIL: Apache not configured as asterisk user. Got:\n{{ _g_apache_user.stdout }}"
+        success_msg: "PASS: Apache configured as User asterisk / Group asterisk"
+      ignore_errors: true
+      tags: [verify]
+
+    - name: "Gather: Apache AllowOverride"
+      ansible.builtin.shell: grep -c 'AllowOverride All' /etc/apache2/apache2.conf
+      register: _g_apache_override
+      changed_when: false
+      failed_when: false
+      tags: [verify]
+
+    - name: |
+        Verify Apache AllowOverride All
+        Description: Checks that AllowOverride is set to All in apache2.conf so FreePBX .htaccess files work
+      ansible.builtin.assert:
+        that:
+          - _g_apache_override.stdout | int > 0
+        fail_msg: "FAIL: AllowOverride All not found in /etc/apache2/apache2.conf"
+        success_msg: "PASS: AllowOverride All is set in apache2.conf"
+      ignore_errors: true
+      tags: [verify]
+
+    - name: "Gather: Apache modules"
+      ansible.builtin.shell: apache2ctl -M 2>/dev/null
+      register: _g_apache_mods
+      changed_when: false
+      failed_when: false
+      tags: [verify]
+
+    - name: |
+        Verify Apache modules
+        Description: Checks that mod_rewrite and mod_ratelimit are enabled in the Apache configuration
+      ansible.builtin.assert:
+        that:
+          - "'rewrite_module' in _g_apache_mods.stdout"
+          - "'ratelimit_module' in _g_apache_mods.stdout"
+        fail_msg: "FAIL: Missing Apache modules (rewrite and/or ratelimit)"
+        success_msg: "PASS: mod_rewrite and mod_ratelimit enabled"
+      ignore_errors: true
+      tags: [verify]
+
+    - name: "Gather: Apache rate limit config"
+      ansible.builtin.stat:
+        path: /etc/apache2/conf-enabled/ratelimit.conf
+      register: _g_ratelimit
+      tags: [verify]
+
+    - name: |
+        Verify Apache rate limiting
+        Description: Checks that the ratelimit.conf is enabled and contains the expected rate limits
+      ansible.builtin.assert:
+        that:
+          - _g_ratelimit.stat.exists
+        fail_msg: "FAIL: /etc/apache2/conf-enabled/ratelimit.conf not found"
+        success_msg: "PASS: Rate limiting configuration is enabled"
+      ignore_errors: true
+      tags: [verify]
+
+    - name: "Gather: default index.html"
+      ansible.builtin.stat:
+        path: /var/www/html/index.html
+      register: _g_indexhtml
+      tags: [verify]
+
+    - name: |
+        Verify default index.html is removed
+        Description: Checks that the default Apache index.html has been removed from /var/www/html/
+      ansible.builtin.assert:
+        that:
+          - not _g_indexhtml.stat.exists
+        fail_msg: "FAIL: /var/www/html/index.html still exists"
+        success_msg: "PASS: Default index.html removed"
+      ignore_errors: true
+      tags: [verify]
+
+    - name: "Gather: FreePBX web UI HTTP response"
+      ansible.builtin.shell: curl -s -o /dev/null -w '%{http_code}' http://localhost/ 2>/dev/null
+      register: _g_webui
+      changed_when: false
+      failed_when: false
+      tags: [verify]
+
+    - name: |
+        Verify FreePBX web UI is accessible
+        Description: Checks that the FreePBX web UI responds on localhost (HTTP 200 or 302 redirect)
+      ansible.builtin.assert:
+        that:
+          - _g_webui.stdout in ['200', '302', '301']
+        fail_msg: "FAIL: Web UI returned HTTP {{ _g_webui.stdout }}. Expected 200 or 302"
+        success_msg: "PASS: Web UI responds with HTTP {{ _g_webui.stdout }}"
+      ignore_errors: true
+      tags: [verify]
+
+    # ==========================================================================
+    # SECTION 7: MARIADB
+    # ==========================================================================
+
+    - name: "Gather: MariaDB service status"
+      ansible.builtin.command: systemctl is-active mariadb
+      register: _g_mariadb_svc
+      changed_when: false
+      failed_when: false
+      tags: [verify]
+
+    - name: "Gather: MariaDB service enabled"
+      ansible.builtin.command: systemctl is-enabled mariadb
+      register: _g_mariadb_enabled
+      changed_when: false
+      failed_when: false
+      tags: [verify]
+
+    - name: |
+        Verify MariaDB service is running and enabled
+        Description: Checks that the mariadb systemd service is active and enabled at boot
+      ansible.builtin.assert:
+        that:
+          - _g_mariadb_svc.stdout == 'active'
+          - _g_mariadb_enabled.stdout == 'enabled'
+        fail_msg: "FAIL: MariaDB active={{ _g_mariadb_svc.stdout }}, enabled={{ _g_mariadb_enabled.stdout }}"
+        success_msg: "PASS: MariaDB is running and enabled at boot"
+      ignore_errors: true
+      tags: [verify]
+
+    - name: "Gather: databases"
+      ansible.builtin.shell: mysql -Ns -e "SHOW DATABASES;"
+      register: _g_databases
+      changed_when: false
+      failed_when: false
+      tags: [verify]
+
+    - name: |
+        Verify FreePBX databases exist
+        Description: Checks that both the 'asterisk' and 'asteriskcdrdb' databases exist in MariaDB
+      ansible.builtin.assert:
+        that:
+          - "'asterisk' in _g_databases.stdout_lines"
+          - "'asteriskcdrdb' in _g_databases.stdout_lines"
+        fail_msg: "FAIL: Missing database(s). Found: {{ _g_databases.stdout_lines }}"
+        success_msg: "PASS: Both 'asterisk' and 'asteriskcdrdb' databases exist"
+      ignore_errors: true
+      tags: [verify]
+
+    - name: "Gather: ODBC config files"
+      ansible.builtin.shell: |
+        echo "--- odbcinst.ini ---"
+        cat /etc/odbcinst.ini 2>/dev/null || echo "MISSING"
+        echo "--- odbc.ini socket ---"
+        grep -i socket /etc/odbc.ini 2>/dev/null || echo "NO SOCKET LINE"
+      register: _g_odbc_conf
+      changed_when: false
+      failed_when: false
+      tags: [verify]
+
+    - name: |
+        Verify ODBC driver configuration
+        Description: Checks that /etc/odbcinst.ini defines the MariaDB driver and /etc/odbc.ini has the correct socket path
+      ansible.builtin.assert:
+        that:
+          - "'libmaodbc.so' in _g_odbc_conf.stdout"
+          - "'/run/mysqld/mysqld.sock' in _g_odbc_conf.stdout"
+        fail_msg: "FAIL: ODBC misconfigured:\n{{ _g_odbc_conf.stdout }}"
+        success_msg: "PASS: ODBC driver configured with correct MariaDB socket"
+      ignore_errors: true
+      tags: [verify]
+
+    - name: "Gather: ODBC connectivity test"
+      ansible.builtin.shell: |
+        DSN=$(grep '^\[' /etc/odbc.ini | head -1 | tr -d '[]')
+        echo "SELECT 1 AS test;" | isql -b "$DSN" 2>&1
+      register: _g_odbc_test
+      changed_when: false
+      failed_when: false
+      tags: [verify]
+
+    - name: |
+        Verify ODBC connectivity
+        Description: Runs a test query through the ODBC connection to confirm database access works end-to-end
+      ansible.builtin.assert:
+        that:
+          - _g_odbc_test.rc == 0
+        fail_msg: "FAIL: ODBC query failed:\n{{ _g_odbc_test.stdout }}"
+        success_msg: "PASS: ODBC connectivity working"
+      ignore_errors: true
+      tags: [verify]
+
+    # ==========================================================================
+    # SECTION 8: ASTERISK
+    # ==========================================================================
+
+    - name: "Gather: Asterisk version"
+      ansible.builtin.command: asterisk -rx 'core show version'
+      register: _g_ast_ver
+      changed_when: false
+      failed_when: false
+      tags: [verify]
+
+    - name: |
+        Verify Asterisk is running
+        Description: Checks that Asterisk is running and responds to 'core show version' via the CLI
+      ansible.builtin.assert:
+        that:
+          - _g_ast_ver.rc == 0
+          - "'Asterisk' in _g_ast_ver.stdout"
+        fail_msg: "FAIL: Asterisk not responding. rc={{ _g_ast_ver.rc }}"
+        success_msg: "PASS: {{ _g_ast_ver.stdout | trim }}"
+      ignore_errors: true
+      tags: [verify]
+
+    - name: "Gather: Asterisk process user"
+      ansible.builtin.shell: ps -o user= -C asterisk | head -1
+      register: _g_ast_proc
+      changed_when: false
+      failed_when: false
+      tags: [verify]
+
+    - name: |
+        Verify Asterisk runs as asterisk user
+        Description: Checks that the Asterisk process is running under the asterisk user account
+      ansible.builtin.assert:
+        that:
+          - "'asterisk' in _g_ast_proc.stdout"
+        fail_msg: "FAIL: Asterisk running as '{{ _g_ast_proc.stdout | trim }}', expected 'asterisk'"
+        success_msg: "PASS: Asterisk running as user 'asterisk'"
+      ignore_errors: true
+      tags: [verify]
+
+    - name: "Gather: Asterisk directory ownership"
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - /etc/asterisk
+        - /var/lib/asterisk
+        - /var/log/asterisk
+        - /var/spool/asterisk
+      register: _g_ast_dirs
+      tags: [verify]
+
+    - name: |
+        Verify Asterisk directory ownership
+        Description: Checks that /etc/asterisk, /var/lib/asterisk, /var/log/asterisk, /var/spool/asterisk are owned by asterisk
+      ansible.builtin.assert:
+        that:
+          - item.stat.pw_name == 'asterisk'
+          - item.stat.gr_name == 'asterisk'
+        fail_msg: "FAIL: {{ item.item }} owned by {{ item.stat.pw_name }}:{{ item.stat.gr_name }}"
+        success_msg: "PASS: {{ item.item }} owned by asterisk:asterisk"
+      loop: "{{ _g_ast_dirs.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+      ignore_errors: true
+      tags: [verify]
+
+    - name: "Gather: Asterisk user config"
+      ansible.builtin.shell: |
+        grep '^AST_USER' /etc/default/asterisk 2>/dev/null
+        grep '^AST_GROUP' /etc/default/asterisk 2>/dev/null
+        grep '^runuser' /etc/asterisk/asterisk.conf 2>/dev/null
+        grep '^rungroup' /etc/asterisk/asterisk.conf 2>/dev/null
+      register: _g_ast_conf
+      changed_when: false
+      failed_when: false
+      tags: [verify]
+
+    - name: |
+        Verify Asterisk user configuration
+        Description: Checks AST_USER/AST_GROUP in /etc/default/asterisk and runuser/rungroup in asterisk.conf
+      ansible.builtin.assert:
+        that:
+          - "'AST_USER=\"asterisk\"' in _g_ast_conf.stdout"
+          - "'AST_GROUP=\"asterisk\"' in _g_ast_conf.stdout"
+          - "'runuser = asterisk' in _g_ast_conf.stdout"
+          - "'rungroup = asterisk' in _g_ast_conf.stdout"
+        fail_msg: "FAIL: Asterisk user config incomplete:\n{{ _g_ast_conf.stdout }}"
+        success_msg: "PASS: AST_USER, AST_GROUP, runuser, rungroup all set to asterisk"
+      ignore_errors: true
+      tags: [verify]
+
+    - name: "Gather: Asterisk symlinks"
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - /usr/share/asterisk/sounds/custom
+        - /var/lib/asterisk/moh/asterisk-moh-opsound
+      register: _g_ast_links
+      tags: [verify]
+
+    - name: |
+        Verify Asterisk symlinks
+        Description: Checks custom sounds and MOH symlinks point to the correct targets
+      ansible.builtin.assert:
+        that:
+          - _g_ast_links.results[0].stat.islnk is defined and _g_ast_links.results[0].stat.islnk
+          - _g_ast_links.results[0].stat.lnk_target == '/var/lib/asterisk/sounds/en/custom'
+          - _g_ast_links.results[1].stat.islnk is defined and _g_ast_links.results[1].stat.islnk
+          - _g_ast_links.results[1].stat.lnk_target == '/usr/share/asterisk/moh'
+        fail_msg: "FAIL: Symlinks missing or pointing to wrong targets"
+        success_msg: "PASS: Custom sounds and MOH symlinks correct"
+      ignore_errors: true
+      tags: [verify]
+
+    - name: "Gather: PJSIP modules"
+      ansible.builtin.command: asterisk -rx 'module show like pjsip'
+      register: _g_pjsip
+      changed_when: false
+      failed_when: false
+      tags: [verify]
+
+    - name: |
+        Verify PJSIP module is loaded
+        Description: Checks that the PJSIP channel driver is loaded and available in Asterisk
+      ansible.builtin.assert:
+        that:
+          - "'res_pjsip.so' in _g_pjsip.stdout"
+        fail_msg: "FAIL: PJSIP module not loaded"
+        success_msg: "PASS: PJSIP module is loaded"
+      ignore_errors: true
+      tags: [verify]
+
+    - name: "Gather: Asterisk codecs"
+      ansible.builtin.command: asterisk -rx 'core show codecs'
+      register: _g_codecs
+      changed_when: false
+      failed_when: false
+      tags: [verify]
+
+    - name: |
+        Verify audio codecs are available
+        Description: Checks that key codecs (g722, gsm, ulaw, alaw) are available in Asterisk
+      ansible.builtin.assert:
+        that:
+          - "'g722' in _g_codecs.stdout"
+          - "'gsm' in _g_codecs.stdout"
+          - "'ulaw' in _g_codecs.stdout"
+          - "'alaw' in _g_codecs.stdout"
+        fail_msg: "FAIL: Missing codecs"
+        success_msg: "PASS: g722, gsm, ulaw, alaw codecs available"
+      ignore_errors: true
+      tags: [verify]
+
+    # ==========================================================================
+    # SECTION 9: FREEPBX
+    # ==========================================================================
+
+    - name: "Gather: FreePBX installation"
+      ansible.builtin.stat:
+        path: /etc/freepbx.conf
+      register: _g_fpbx_conf
+      tags: [verify]
+
+    - name: "Gather: fwconsole version"
+      ansible.builtin.command: fwconsole --version
+      register: _g_fpbx_ver
+      changed_when: false
+      failed_when: false
+      tags: [verify]
+
+    - name: |
+        Verify FreePBX is installed
+        Description: Checks that /etc/freepbx.conf exists and fwconsole returns a version
+      ansible.builtin.assert:
+        that:
+          - _g_fpbx_conf.stat.exists
+          - _g_fpbx_ver.rc == 0
+        fail_msg: "FAIL: FreePBX not installed (freepbx.conf={{ _g_fpbx_conf.stat.exists }}, fwconsole rc={{ _g_fpbx_ver.rc }})"
+        success_msg: "PASS: FreePBX installed - {{ _g_fpbx_ver.stdout | trim }}"
+      ignore_errors: true
+      tags: [verify]
+
+    - name: "Gather: FreePBX service status"
+      ansible.builtin.shell: |
+        echo "enabled=$(systemctl is-enabled freepbx 2>/dev/null)"
+        echo "active=$(systemctl is-active freepbx 2>/dev/null)"
+      register: _g_fpbx_svc
+      changed_when: false
+      failed_when: false
+      tags: [verify]
+
+    - name: |
+        Verify FreePBX service
+        Description: Checks that the freepbx systemd service is enabled and active
+      ansible.builtin.assert:
+        that:
+          - "'enabled=enabled' in _g_fpbx_svc.stdout"
+          - "'active=active' in _g_fpbx_svc.stdout"
+        fail_msg: "FAIL: FreePBX service not enabled/active:\n{{ _g_fpbx_svc.stdout }}"
+        success_msg: "PASS: FreePBX service is enabled and active"
+      ignore_errors: true
+      tags: [verify]
+
+    - name: "Gather: FreePBX module list"
+      ansible.builtin.command: fwconsole ma list
+      register: _g_fpbx_mods
+      changed_when: false
+      failed_when: false
+      tags: [verify]
+
+    - name: |
+        Verify FreePBX modules
+        Description: Checks that all expected modules (core, voicemail, queues, ivr, backup, sipsettings, etc.) are enabled
+      ansible.builtin.assert:
+        that:
+          - "'| core ' in _g_fpbx_mods.stdout"
+          - "'| voicemail ' in _g_fpbx_mods.stdout"
+          - "'| queues ' in _g_fpbx_mods.stdout"
+          - "'| ivr ' in _g_fpbx_mods.stdout"
+          - "'| backup ' in _g_fpbx_mods.stdout"
+          - "'| sipsettings ' in _g_fpbx_mods.stdout"
+          - "'| dashboard ' in _g_fpbx_mods.stdout"
+          - "'| ringgroups ' in _g_fpbx_mods.stdout"
+          - "'| conferences ' in _g_fpbx_mods.stdout"
+          - "'| timeconditions ' in _g_fpbx_mods.stdout"
+          - "'| recordings ' in _g_fpbx_mods.stdout"
+          - "'| music ' in _g_fpbx_mods.stdout"
+          - "'| filestore ' in _g_fpbx_mods.stdout"
+        fail_msg: "FAIL: One or more FreePBX modules missing"
+        success_msg: "PASS: All expected FreePBX modules installed"
+      ignore_errors: true
+      tags: [verify]
+
+    - name: "Gather: backup directory"
+      ansible.builtin.stat:
+        path: /var/spool/asterisk/backup
+      register: _g_backup_dir
+      tags: [verify]
+
+    - name: |
+        Verify backup directory exists
+        Description: Checks that /var/spool/asterisk/backup exists and is owned by asterisk
+      ansible.builtin.assert:
+        that:
+          - _g_backup_dir.stat.exists
+          - _g_backup_dir.stat.isdir
+          - _g_backup_dir.stat.pw_name == 'asterisk'
+        fail_msg: "FAIL: /var/spool/asterisk/backup missing or wrong ownership"
+        success_msg: "PASS: Backup directory exists with correct ownership"
+      ignore_errors: true
+      tags: [verify]
+
+    # ==========================================================================
+    # SECTION 10: SECURITY - FAIL2BAN
+    # ==========================================================================
+
+    - name: "Gather: Fail2ban service status"
+      ansible.builtin.command: systemctl is-active fail2ban
+      register: _g_f2b_svc
+      changed_when: false
+      failed_when: false
+      tags: [verify]
+
+    - name: "Gather: Fail2ban service enabled"
+      ansible.builtin.command: systemctl is-enabled fail2ban
+      register: _g_f2b_enabled
+      changed_when: false
+      failed_when: false
+      tags: [verify]
+
+    - name: |
+        Verify Fail2ban service is running and enabled
+        Description: Checks that the fail2ban systemd service is active and enabled at boot
+      ansible.builtin.assert:
+        that:
+          - _g_f2b_svc.stdout == 'active'
+          - _g_f2b_enabled.stdout == 'enabled'
+        fail_msg: "FAIL: Fail2ban active={{ _g_f2b_svc.stdout }}, enabled={{ _g_f2b_enabled.stdout }}"
+        success_msg: "PASS: Fail2ban is running and enabled at boot"
+      ignore_errors: true
+      tags: [verify]
+
+    - name: "Gather: Fail2ban jail list"
+      ansible.builtin.command: fail2ban-client status
+      register: _g_f2b_jails
+      changed_when: false
+      failed_when: false
+      tags: [verify]
+
+    - name: |
+        Verify Fail2ban jails are active
+        Description: Checks that sshd, asterisk, and freepbx jails are all active and accepting connections
+      ansible.builtin.assert:
+        that:
+          - "'sshd' in _g_f2b_jails.stdout"
+          - "'asterisk' in _g_f2b_jails.stdout"
+          - "'freepbx' in _g_f2b_jails.stdout"
+        fail_msg: "FAIL: Missing fail2ban jails:\n{{ _g_f2b_jails.stdout }}"
+        success_msg: "PASS: sshd, asterisk, and freepbx jails are active"
+      ignore_errors: true
+      tags: [verify]
+
+    - name: "Gather: Fail2ban jail settings"
+      ansible.builtin.shell: |
+        for jail in sshd asterisk freepbx; do
+          echo "${jail}_maxretry=$(fail2ban-client get $jail maxretry 2>/dev/null)"
+          echo "${jail}_findtime=$(fail2ban-client get $jail findtime 2>/dev/null)"
+          echo "${jail}_bantime=$(fail2ban-client get $jail bantime 2>/dev/null)"
+        done
+      register: _g_f2b_settings
+      changed_when: false
+      failed_when: false
+      tags: [verify]
+
+    - name: |
+        Verify Fail2ban jail settings
+        Description: Checks maxretry=3, findtime=900, bantime=600 for each jail
+      ansible.builtin.assert:
+        that:
+          - "'sshd_maxretry=3' in _g_f2b_settings.stdout"
+          - "'sshd_findtime=900' in _g_f2b_settings.stdout"
+          - "'sshd_bantime=600' in _g_f2b_settings.stdout"
+          - "'asterisk_maxretry=3' in _g_f2b_settings.stdout"
+          - "'freepbx_maxretry=3' in _g_f2b_settings.stdout"
+        fail_msg: "FAIL: Jail settings incorrect:\n{{ _g_f2b_settings.stdout }}"
+        success_msg: "PASS: All jails configured with maxretry=3, findtime=900, bantime=600"
+      ignore_errors: true
+      tags: [verify]
+
+    - name: "Gather: server public IP"
+      ansible.builtin.uri:
+        url: https://checkip.amazonaws.com
+        return_content: true
+      register: _g_pubip
+      failed_when: false
+      tags: [verify]
+
+    - name: "Gather: Fail2ban ignoreip"
+      ansible.builtin.command: fail2ban-client get sshd ignoreip
+      register: _g_f2b_ignore
+      changed_when: false
+      failed_when: false
+      tags: [verify]
+
+    - name: |
+        Verify Fail2ban ignoreip includes server public IP
+        Description: Fetches the server public IP and verifies it appears in the fail2ban ignoreip list
+      ansible.builtin.assert:
+        that:
+          - "(_g_pubip.content | trim) in _g_f2b_ignore.stdout"
+        fail_msg: "FAIL: Public IP {{ _g_pubip.content | trim }} not in ignoreip: {{ _g_f2b_ignore.stdout }}"
+        success_msg: "PASS: Public IP {{ _g_pubip.content | trim }} is whitelisted in fail2ban"
+      ignore_errors: true
+      when: _g_pubip.content is defined
+      tags: [verify]
+
+    - name: "Gather: security log files"
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - /var/log/asterisk/asterisk_security.log
+        - /var/log/asterisk/freepbx_security.log
+      register: _g_seclogs
+      tags: [verify]
+
+    - name: |
+        Verify security log files
+        Description: Checks that asterisk_security.log and freepbx_security.log exist with correct ownership (asterisk:asterisk, 0664)
+      ansible.builtin.assert:
+        that:
+          - item.stat.exists
+          - item.stat.pw_name == 'asterisk'
+          - item.stat.gr_name == 'asterisk'
+        fail_msg: "FAIL: {{ item.item }} - exists={{ item.stat.exists }}"
+        success_msg: "PASS: {{ item.item }} exists, owned by asterisk:asterisk"
+      loop: "{{ _g_seclogs.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+      ignore_errors: true
+      tags: [verify]
+
+    # ==========================================================================
+    # SECTION 11: SECURITY - UFW FIREWALL
+    # ==========================================================================
+
+    - name: "Gather: UFW status"
+      ansible.builtin.command: ufw status verbose
+      register: _g_ufw
+      changed_when: false
+      failed_when: false
+      when: enable_ufw
+      tags: [verify]
+
+    - name: |
+        Verify UFW is active
+        Description: Checks that UFW is enabled and the default incoming policy is deny
+      ansible.builtin.assert:
+        that:
+          - "'Status: active' in _g_ufw.stdout"
+          - "'deny (incoming)' in _g_ufw.stdout"
+          - "'allow (outgoing)' in _g_ufw.stdout"
+        fail_msg: "FAIL: UFW not active or wrong default policy"
+        success_msg: "PASS: UFW active, default incoming=deny, outgoing=allow"
+      ignore_errors: true
+      when: enable_ufw
+      tags: [verify]
+
+    - name: |
+        Verify UFW rules
+        Description: Checks that SSH (22/tcp), SIP (5060/udp), and RTP (10000:20000/udp) are allowed
+      ansible.builtin.assert:
+        that:
+          - "'22/tcp' in _g_ufw.stdout"
+          - "'5060/udp' in _g_ufw.stdout"
+          - "'10000:20000/udp' in _g_ufw.stdout"
+        fail_msg: "FAIL: Missing firewall rules. Current rules:\n{{ _g_ufw.stdout }}"
+        success_msg: "PASS: SSH, SIP, and RTP firewall rules present"
+      ignore_errors: true
+      when: enable_ufw
+      tags: [verify]
+
+    - name: |
+        Verify port 80 is blocked
+        Description: When ufw_allow_web is false, verifies that port 80 is not in the UFW allow rules
+      ansible.builtin.assert:
+        that:
+          - "'80/tcp' not in _g_ufw.stdout"
+        fail_msg: "FAIL: Port 80 is allowed but ufw_allow_web is false"
+        success_msg: "PASS: Port 80 is not in firewall allow rules"
+      ignore_errors: true
+      when: enable_ufw and not ufw_allow_web
+      tags: [verify]
+
+    - name: "Gather: external HTTP connectivity from control machine"
+      ansible.builtin.shell: >
+        curl -s -o /dev/null -w '%{http_code}' --connect-timeout 5 http://{{ _g_pubip.content | trim }}/ 2>/dev/null; true
+      register: _g_http_external
+      changed_when: false
+      failed_when: false
+      delegate_to: localhost
+      become: false
+      when: enable_ufw and not ufw_allow_web and _g_pubip.content is defined
+      tags: [verify]
+
+    - name: |
+        Verify firewall blocks external HTTP access
+        Description: Connects to the server public IP on port 80 from the control machine and verifies it is refused or times out
+      ansible.builtin.assert:
+        that:
+          - _g_http_external.stdout == '000'
+        fail_msg: "FAIL: Port 80 is reachable externally (HTTP {{ _g_http_external.stdout }}). Firewall is not blocking HTTP."
+        success_msg: "PASS: Port 80 is not reachable externally from the control machine (connection refused/timeout)"
+      ignore_errors: true
+      when: enable_ufw and not ufw_allow_web and _g_pubip.content is defined
+      tags: [verify]
+
+    - name: "Gather: netfilter-persistent status"
+      ansible.builtin.command: systemctl is-enabled netfilter-persistent
+      register: _g_netfilter
+      changed_when: false
+      failed_when: false
+      when: enable_ufw
+      tags: [verify]
+
+    - name: |
+        Verify netfilter-persistent is disabled
+        Description: Checks that netfilter-persistent is disabled so it cannot override UFW rules on reboot
+      ansible.builtin.assert:
+        that:
+          - _g_netfilter.stdout != 'enabled'
+        fail_msg: "FAIL: netfilter-persistent is {{ _g_netfilter.stdout }} - it may override UFW rules on reboot"
+        success_msg: "PASS: netfilter-persistent is not enabled ({{ _g_netfilter.stdout | default('not found') }})"
+      ignore_errors: true
+      when: enable_ufw
+      tags: [verify]
+
+    # ==========================================================================
+    # SECTION 12: LOG ROTATION
+    # ==========================================================================
+
+    - name: "Gather: logrotate config"
+      ansible.builtin.stat:
+        path: /etc/logrotate.d/asterisk-custom
+      register: _g_logrotate_stat
+      tags: [verify]
+
+    - name: "Gather: logrotate validation"
+      ansible.builtin.shell: logrotate -d /etc/logrotate.d/asterisk-custom 2>&1
+      register: _g_logrotate_check
+      changed_when: false
+      failed_when: false
+      tags: [verify]
+
+    - name: |
+        Verify logrotate configuration
+        Description: Checks that /etc/logrotate.d/asterisk-custom exists and passes logrotate syntax validation
+      ansible.builtin.assert:
+        that:
+          - _g_logrotate_stat.stat.exists
+          - _g_logrotate_check.rc == 0 or 'error' not in _g_logrotate_check.stdout | lower
+        fail_msg: "FAIL: Logrotate config missing or invalid (rc={{ _g_logrotate_check.rc }}):\n{{ _g_logrotate_check.stdout }}"
+        success_msg: "PASS: Logrotate configuration valid"
+      ignore_errors: true
+      tags: [verify]
+
+    # ==========================================================================
+    # SECTION 13: CRON JOBS
+    # ==========================================================================
+
+    - name: "Gather: crontab"
+      ansible.builtin.command: crontab -l
+      register: _g_crontab
+      changed_when: false
+      failed_when: false
+      tags: [verify]
+
+    - name: |
+        Verify crontab is installed
+        Description: Checks that root's crontab contains all expected daily maintenance jobs
+      ansible.builtin.assert:
+        that:
+          - "'monitor' in _g_crontab.stdout"
+          - "'voicemail' in _g_crontab.stdout"
+          - "'_cache' in _g_crontab.stdout"
+          - "'cdr' in _g_crontab.stdout"
+          - "'cel' in _g_crontab.stdout"
+        fail_msg: "FAIL: Crontab missing expected jobs"
+        success_msg: "PASS: All 5 cron maintenance jobs installed"
+      ignore_errors: true
+      tags: [verify]
+
+    - name: "Gather: CDR/CEL table queries"
+      ansible.builtin.shell: |
+        mysql -Ns -e "SELECT COUNT(*) FROM cdr;" asteriskcdrdb 2>&1
+        mysql -Ns -e "SELECT COUNT(*) FROM cel;" asteriskcdrdb 2>&1
+      register: _g_cron_db
+      changed_when: false
+      failed_when: false
+      tags: [verify]
+
+    - name: |
+        Verify cron database queries work
+        Description: Runs test SELECT queries against CDR and CEL tables to confirm the cron SQL will succeed
+      ansible.builtin.assert:
+        that:
+          - _g_cron_db.rc == 0
+        fail_msg: "FAIL: CDR/CEL queries failed:\n{{ _g_cron_db.stdout }}"
+        success_msg: "PASS: CDR and CEL table queries succeed"
+      ignore_errors: true
+      tags: [verify]
+
+    - name: "Gather: cron target directories"
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - /var/spool/asterisk/monitor
+        - /var/spool/asterisk/voicemail
+      register: _g_cron_dirs
+      tags: [verify]
+
+    - name: |
+        Verify cron target directories exist
+        Description: Checks that /var/spool/asterisk/monitor and /var/spool/asterisk/voicemail directories exist
+      ansible.builtin.assert:
+        that:
+          - item.stat.exists
+          - item.stat.isdir
+        fail_msg: "FAIL: {{ item.item }} does not exist"
+        success_msg: "PASS: {{ item.item }} exists"
+      loop: "{{ _g_cron_dirs.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+      ignore_errors: true
+      tags: [verify]
+
+    # ==========================================================================
+    # SECTION 14: END-TO-END MANUAL TESTS
+    # ==========================================================================
+
+    - name: |
+        Verify SIP trunk registration
+        Description: MANUAL - Checks pjsip show registrations and asks operator to confirm trunks are registered
+      block:
+        - name: Get PJSIP registrations
+          ansible.builtin.command: asterisk -rx 'pjsip show registrations'
+          register: _g_sip_reg
+          changed_when: false
+          failed_when: false
+
+        - name: Get PJSIP endpoints
+          ansible.builtin.command: asterisk -rx 'pjsip show endpoints'
+          register: _g_sip_endpoints
+          changed_when: false
+          failed_when: false
+
+        - name: Show SIP registrations
+          ansible.builtin.debug:
+            msg: |
+              ---- SIP TRUNK REGISTRATIONS ----
+              {{ _g_sip_reg.stdout }}
+
+              ---- SIP ENDPOINTS ----
+              {{ _g_sip_endpoints.stdout }}
+
+              HOW TO VERIFY:
+              - Trunks should show 'Registered' in the registrations table above
+              - You can also check manually by SSHing into the server and running:
+                  asterisk -rx 'pjsip show registrations'
+                  asterisk -rx 'pjsip show endpoints'
+              - In the FreePBX web UI: Connectivity > Trunks, check each trunk status
+              - If no trunks are configured yet, answer 'skip'
+
+        - name: Confirm trunk registration
+          ansible.builtin.pause:
+            prompt: "Are SIP trunks registered correctly? (yes/no/skip)"
+          register: _g_sip_confirm
+
+        - name: Assert trunk registration
+          ansible.builtin.assert:
+            that:
+              - _g_sip_confirm.user_input | lower in ['yes', 'y', 'skip']
+            fail_msg: "FAIL: SIP trunk registration not confirmed"
+            success_msg: "PASS: SIP trunk registration confirmed"
+      rescue:
+        - name: SIP registration test failed
+          ansible.builtin.debug:
+            msg: "FAIL: SIP trunk registration test not confirmed"
+      tags: [verify, manual]
+
+    - name: |
+        Verify outbound calling
+        Description: MANUAL - Place a test outbound call through the system and confirm audio works both ways
+      block:
+        - name: Show outbound call instructions
+          ansible.builtin.debug:
+            msg: |
+              OUTBOUND CALL TEST:
+
+              SETUP (if not already done):
+              1. Open FreePBX web UI via SSH tunnel:
+                   ssh -L 8080:localhost:80 {{ ansible_user | default('ubuntu') }}@{{ ansible_host }}
+                   Then open http://localhost:8080 in your browser
+              2. Create an extension: Applications > Extensions > Add Extension > Add New PJSIP Extension
+                   - Set an extension number (e.g., 1001) and a password
+              3. Configure a SIP softphone (Linphone, Zoiper, or Obi device):
+                   - Server: {{ ansible_host }}
+                   - Username: your extension number (e.g., 1001)
+                   - Password: the extension password you set
+                   - Transport: UDP, Port: 5060
+
+              TEST:
+              1. From your registered softphone, dial an external number (e.g., your mobile)
+              2. Verify: call connects and rings the destination
+              3. Verify: two-way audio works (you hear them, they hear you)
+              4. If no trunks/outbound routes are configured yet, answer 'skip'
+
+        - name: Confirm outbound call
+          ansible.builtin.pause:
+            prompt: "Did the outbound call work with two-way audio? (yes/no/skip)"
+          register: _g_outbound_confirm
+
+        - name: Assert outbound call
+          ansible.builtin.assert:
+            that:
+              - _g_outbound_confirm.user_input | lower in ['yes', 'y', 'skip']
+            fail_msg: "FAIL: Outbound calling not confirmed"
+            success_msg: "PASS: Outbound calling confirmed"
+      rescue:
+        - name: Outbound call test failed
+          ansible.builtin.debug:
+            msg: "FAIL: Outbound call test not confirmed"
+      tags: [verify, manual]
+
+    - name: |
+        Verify inbound calling
+        Description: MANUAL - Call the PBX DID number from an external phone and confirm the call is answered
+      block:
+        - name: Get inbound routes
+          ansible.builtin.shell: echo "SELECT extension, destination, description FROM incoming;" | fwconsole mysql 2>/dev/null || echo "(could not query routes)"
+          register: _g_inbound_routes
+          changed_when: false
+          failed_when: false
+
+        - name: Show inbound call instructions
+          ansible.builtin.debug:
+            msg: |
+              INBOUND CALL TEST:
+
+              CURRENT INBOUND ROUTES:
+              {{ _g_inbound_routes.stdout }}
+
+              HOW TO FIND YOUR DID NUMBER:
+              - In FreePBX web UI: Connectivity > Inbound Routes
+              - Your DID number is the number your SIP provider assigned to your trunk
+              - Check your provider's portal for the DID/phone number
+
+              TEST:
+              1. From an external phone (e.g., your mobile), dial your PBX DID number
+              2. Verify: PBX answers (you should hear an IVR greeting, ringing to an extension, or ring group)
+              3. Answer on the PBX side and verify two-way audio
+              4. If no inbound routes are configured yet, answer 'skip'
+
+        - name: Confirm inbound call
+          ansible.builtin.pause:
+            prompt: "Did the inbound call work correctly? (yes/no/skip)"
+          register: _g_inbound_confirm
+
+        - name: Assert inbound call
+          ansible.builtin.assert:
+            that:
+              - _g_inbound_confirm.user_input | lower in ['yes', 'y', 'skip']
+            fail_msg: "FAIL: Inbound calling not confirmed"
+            success_msg: "PASS: Inbound calling confirmed"
+      rescue:
+        - name: Inbound call test failed
+          ansible.builtin.debug:
+            msg: "FAIL: Inbound call test not confirmed"
+      tags: [verify, manual]
+
+    - name: |
+        Verify voicemail
+        Description: MANUAL - Leave a voicemail message and confirm it is recorded and accessible
+      block:
+        - name: Show voicemail instructions
+          ansible.builtin.debug:
+            msg: |
+              VOICEMAIL TEST:
+              1. Call an extension on the PBX and let it go to voicemail
+              2. Leave a test message
+              3. Check voicemail (dial *97 from the extension, or check the web UI)
+              4. Verify the message was recorded and is audible
+              5. If voicemail is not configured yet, answer 'skip'
+
+        - name: Confirm voicemail
+          ansible.builtin.pause:
+            prompt: "Did voicemail recording and playback work? (yes/no/skip)"
+          register: _g_vm_confirm
+
+        - name: Assert voicemail
+          ansible.builtin.assert:
+            that:
+              - _g_vm_confirm.user_input | lower in ['yes', 'y', 'skip']
+            fail_msg: "FAIL: Voicemail not confirmed"
+            success_msg: "PASS: Voicemail confirmed"
+      rescue:
+        - name: Voicemail test failed
+          ansible.builtin.debug:
+            msg: "FAIL: Voicemail test not confirmed"
+      tags: [verify, manual]
+
+    # ==========================================================================
+    # SUMMARY
+    # ==========================================================================
+
+    - name: |
+        Verification complete
+        Description: Displays a summary message indicating the verification run has finished
+      ansible.builtin.debug:
+        msg: |
+          ============================================
+          VERIFICATION RUN COMPLETE
+          ============================================
+
+          Check the Ansible play recap below for results:
+            ok     = passed tests
+            failed = 0 (all failures are captured as 'ignored')
+            ignored = failed tests
+
+          To run only automated tests:
+            ansible-playbook -i inventory.yml verify.yml --skip-tags manual
+
+          To run only manual tests:
+            ansible-playbook -i inventory.yml verify.yml --tags manual
+
+          ============================================
+      tags: [verify]

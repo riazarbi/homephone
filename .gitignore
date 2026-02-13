@@ -1,0 +1,5 @@
+.env
+.claude
+ansible.log
+vars.yml
+inventory.yml

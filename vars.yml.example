@@ -1,0 +1,123 @@
+# Ubuntu PBX Configuration Variables
+# ===================================
+#
+# Edit these values before running the playbook.
+
+# ------------------------------------------------------------------------------
+# UBUNTU PRO (optional)
+# ------------------------------------------------------------------------------
+# Get your token from: https://ubuntu.com/pro/dashboard
+# Leave empty ("") if not using Ubuntu Pro, or if using Ubuntu Pro cloud images
+# on Azure, AWS, or Google Cloud (they attach automatically)
+ubuntu_pro_token: ""
+
+# ------------------------------------------------------------------------------
+# SMTP/EMAIL SETTINGS
+# ------------------------------------------------------------------------------
+# Configure these to enable email notifications from your PBX.
+#
+# SendGrid example (https://console.cloud.google.com/marketplace/product/sendgrid-app/sendgrid-email):
+#   smtp_host: "smtp.sendgrid.net"
+#   smtp_port: "587"
+#   smtp_username: "apikey"
+#   smtp_password: "YOUR-API-KEY-HERE"  # From https://app.sendgrid.com/settings/api_keys
+#
+# Gmail example:
+#   smtp_host: "smtp.gmail.com"
+#   smtp_port: "587"
+#   smtp_username: "youremail@gmail.com"
+#   smtp_password: "YOUR-APP-PASSWORD"  # From https://myaccount.google.com/apppasswords
+
+smtp_host: "smtp.mailserver.com"
+smtp_port: "587"
+smtp_username: "user@example.com"
+smtp_password: ""  # Loaded from .env file in playbook pre_tasks
+
+# Example .env file contents:
+# SMTP_PASSWORD=veryhardpassword
+#
+
+# Email address for daily crontab notifications
+notification_email: "noreply@example.com"
+
+# ------------------------------------------------------------------------------
+# SERVER IDENTITY
+# ------------------------------------------------------------------------------
+# HOSTNAME: subdomain of FQDN (e.g., "server" for "server.example.com")
+# FQDN: fully qualified domain name (e.g., "example.com" or "server.example.com")
+# DOMAIN: registrable domain for Postfix and fail2ban sender address
+#         (e.g., "example.com")
+
+hostname: "homephone"
+fqdn: "example.com"
+domain: "example.com"
+
+# ------------------------------------------------------------------------------
+# BACKUP RESTORE
+# ------------------------------------------------------------------------------
+# URL to FreePBX backup file (generated with Backup & Restore module)
+# Supports https:// and gs:// (Google Cloud Storage) URLs
+# Set to "" to skip restoring a backup and configure trunks manually via web UI
+restore_backup: ""
+
+# ------------------------------------------------------------------------------
+# SIP PROVIDER IPS (for fail2ban whitelist)
+# ------------------------------------------------------------------------------
+# Your SIP trunk provider's signaling IPs, so fail2ban doesn't block them.
+# Find these in your provider's documentation or support portal.
+# Use standard dotted decimal notation or CIDR notation.
+# Separate multiple entries with spaces (no commas).
+# Example: "197.85.171.0/24 154.0.160.0/21"
+
+sip_provider_ips: ""
+
+# ------------------------------------------------------------------------------
+# FAIL2BAN WHITELIST
+# ------------------------------------------------------------------------------
+# Additional public IPv4 addresses that should never be blocked by fail2ban.
+# Use standard dotted decimal notation or CIDR notation.
+# Separate multiple entries with spaces (no commas).
+# Example: "192.178.0.0/15 142.251.47.238"
+
+user_ips: ""
+
+# ------------------------------------------------------------------------------
+# SYSTEM SETTINGS
+# ------------------------------------------------------------------------------
+# Timezone (as represented in /usr/share/zoneinfo)
+# Use "" for UTC
+timezone: "Africa/Johannesburg"
+
+# Time to install security patches and reboot (24-hour format HH:MM)
+security_install_time: "04:10"
+security_reboot_time: "04:30"
+
+# Number of days to retain CDR and CEL records in FreePBX database
+cdr_retention_days: "60"
+cel_retention_days: "60"
+
+# ------------------------------------------------------------------------------
+# PHP VERSION
+# ------------------------------------------------------------------------------
+# PHP 8.2: Officially tested with FreePBX by Sangoma
+#          Security maintained until 31 Dec 2026 by PHP Group
+# PHP 8.3: Compatible with FreePBX and all modules
+#          Security maintained until 2036 through Canonical (Ubuntu)
+#
+# Valid values: "8.2" or "8.3"
+
+php_version: "8.3"
+
+# ------------------------------------------------------------------------------
+# FIREWALL (ufw)
+# ------------------------------------------------------------------------------
+# Enable ufw firewall with rules for SIP/RTP traffic
+# When enabled, opens: SSH (22), SIP (5060/udp), RTP (10000-20000/udp)
+# Web UI (port 80) is blocked by default - access via SSH tunnel instead:
+#   ssh -L 8080:localhost:80 user@your-server
+#   Then open http://localhost:8080
+
+enable_ufw: true
+
+# Set to true to also allow port 80 from the internet (not recommended)
+ufw_allow_web: false

@@ -1,0 +1,24 @@
+# Ansible Inventory for Ubuntu PBX
+# ================================
+#
+# Replace the example host with your target server(s)
+#
+# Usage:
+#   ansible-playbook -i inventory.yml playbook.yml
+#
+# For a single server, you can also use:
+#   ansible-playbook -i "your-server-ip," playbook.yml
+
+all:
+  hosts:
+    pbx-server:
+      ansible_host: example.com  # Replace with your server's IP or hostname
+      ansible_user: ubuntu         # Replace with your SSH username
+      ansible_ssh_private_key_file: ~/.ssh/id_rsa  # Optional: path to your local SSH key
+
+  # For multiple servers, add more hosts:
+  # hosts:
+  #   pbx-server-1:
+  #     ansible_host: 192.168.1.100
+  #   pbx-server-2:
+  #     ansible_host: 192.168.1.101
