@@ -282,6 +282,9 @@
           - sox
           - ufw
           - unixodbc
+          - sngrep
+          - tcpdump
+          - nano
         state: present
 
     - name: Configure needrestart for automatic restarts
@@ -747,10 +750,10 @@
         comment: "SSH"
       when: enable_ufw
 
-    - name: Allow SIP (port 5060/udp)
+    - name: "Allow SIP (port {{ sip_port }}/udp)"
       community.general.ufw:
         rule: allow
-        port: "5060"
+        port: "{{ sip_port }}"
         proto: udp
         comment: "SIP signaling"
       when: enable_ufw
@@ -847,6 +850,10 @@
 
     - name: Run fwconsole restart
       ansible.builtin.command: fwconsole restart
+      changed_when: true
+
+    - name: Configure PJSIP UDP transport bind port
+      ansible.builtin.command: fwconsole setting ASTSIPPORT {{ sip_port }}
       changed_when: true
 
     - name: Run fwconsole reload

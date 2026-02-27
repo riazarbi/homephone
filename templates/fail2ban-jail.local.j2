@@ -25,7 +25,7 @@ logpath = /var/log/asterisk/asterisk_security.log
 maxretry = 3
 findtime = 900
 bantime = 600
-action = iptables[name=asterisk, port=5060, protocol=udp]
+action = iptables[name=asterisk, port={{ sip_port }}, protocol=udp]
          %(action_mw)s
 
 [freepbx]

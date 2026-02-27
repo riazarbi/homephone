@@ -52,6 +52,7 @@ Edit `vars.yml` before running. Key settings:
 | `hostname` / `fqdn` | Server identity (used by Postfix if email is configured) |
 | `smtp_*` | Email relay settings (optional) |
 | `enable_ufw` | Enable host firewall (recommended) |
+| `sip_port` | SIP signaling port (default `5060`). Use a non-standard port to reduce scanner spam |
 | `php_version` | `8.3` (default) or `8.2` |
 
 ## Useful Flags
@@ -91,7 +92,7 @@ When `enable_ufw: true`, the following ports are opened:
 | Port | Protocol | Purpose |
 |------|----------|---------|
 | 22 | TCP | SSH |
-| 5060 | UDP | SIP signaling |
+| `sip_port` (default 5060) | UDP | SIP signaling |
 | 10000-20000 | UDP | RTP (voice traffic) |
 
 Port 80 (web UI) is blocked by default. Set `ufw_allow_web: true` to open it.

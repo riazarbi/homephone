@@ -1107,11 +1107,11 @@
 
     - name: |
         Verify UFW rules
-        Description: Checks that SSH (22/tcp), SIP (5060/udp), and RTP (10000:20000/udp) are allowed
+        Description: Checks that SSH (22/tcp), SIP ({{ sip_port }}/udp), and RTP (10000:20000/udp) are allowed
       ansible.builtin.assert:
         that:
           - "'22/tcp' in _g_ufw.stdout"
-          - "'5060/udp' in _g_ufw.stdout"
+          - "'{{ sip_port }}/udp' in _g_ufw.stdout"
           - "'10000:20000/udp' in _g_ufw.stdout"
         fail_msg: "FAIL: Missing firewall rules. Current rules:\n{{ _g_ufw.stdout }}"
         success_msg: "PASS: SSH, SIP, and RTP firewall rules present"
@@ -1346,7 +1346,7 @@
                    - Server: {{ ansible_host }}
                    - Username: your extension number (e.g., 1001)
                    - Password: the extension password you set
-                   - Transport: UDP, Port: 5060
+                   - Transport: UDP, Port: {{ sip_port }}
 
               TEST:
               1. From your registered softphone, dial an external number (e.g., your mobile)
