@@ -1,5 +1,7 @@
 # Grandstream GHP611W — Outbound Calls Failing (FreePBX/Asterisk)
 
+NOTE: We could never get sound quality good enough to be usable with this phone. We ended up standardizing on Fanvil X301W.
+
 ## Symptom
 - Phone registers successfully with FreePBX
 - Phone can receive calls (audio works both ways)
