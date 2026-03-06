@@ -1,0 +1,7 @@
+; Force file-based voicemail instead of ODBC voicemail
+; FreePBX loads app_voicemail_odbc.so by default, which requires
+; database tables that are never set up. This ensures the standard
+; file-based app_voicemail.so is used instead.
+noload => app_voicemail_odbc.so
+noload => app_voicemail_imap.so
+load => app_voicemail.so

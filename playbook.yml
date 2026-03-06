@@ -844,6 +844,20 @@
       changed_when: true
       failed_when: "restore_backup != '' and 'Restore processing for modules are finished successfully' not in core_restore.stdout"
 
+    - name: Deploy voicemail module configuration
+      ansible.builtin.template:
+        src: templates/modules_custom.conf.j2
+        dest: /etc/asterisk/modules_custom.conf
+        owner: asterisk
+        group: asterisk
+        mode: "0644"
+
+    - name: Include modules_custom.conf in modules.conf
+      ansible.builtin.lineinfile:
+        path: /etc/asterisk/modules.conf
+        line: "#include modules_custom.conf"
+        state: present
+
     - name: Run fwconsole chown
       ansible.builtin.command: fwconsole chown
       changed_when: true
